@@ -1,0 +1,3153 @@
+import {
+  register,
+  login,
+  logout,
+  fetchMe,
+  updateLanguages,
+  saveOnboarding,
+  fetchChapters,
+  fetchTopic,
+  executeCode,
+  fetchQuizProgress,
+  fetchNextQuestion,
+  submitQuizAnswer,
+  fetchQuizHint,
+  fetchShopItems,
+  purchaseCosmetic,
+  equipCosmetic,
+  purchaseStreakFreeze,
+  randomizeAvatar,
+  equipAvatar,
+  claimStarterAvatar,
+  fetchProfile,
+  updateProfileAccount,
+  deleteAccount,
+  fetchHome,
+} from './api.js'
+import { SUPPORTED_LANGUAGES } from '../shared/languages.js'
+import { icons } from './icons.js'
+import { initTheme, toggleTheme, currentTheme } from './theme.js'
+import { marked } from 'marked'
+import { EditorView, basicSetup } from 'codemirror'
+import { EditorState } from '@codemirror/state'
+import { StreamLanguage, HighlightStyle, syntaxHighlighting } from '@codemirror/language'
+import { tags } from '@lezer/highlight'
+import { javascript } from '@codemirror/lang-javascript'
+import { python } from '@codemirror/lang-python'
+import { sql } from '@codemirror/lang-sql'
+import { html } from '@codemirror/lang-html'
+import { java } from '@codemirror/lang-java'
+import { cpp } from '@codemirror/lang-cpp'
+import { go } from '@codemirror/legacy-modes/mode/go'
+import { rust } from '@codemirror/legacy-modes/mode/rust'
+
+const app = document.querySelector('#app')
+
+initTheme()
+
+// ---- App state ----
+// No framework here — re-render the relevant screen's innerHTML on every
+// change and re-attach listeners each time (except for purely visual DOM
+// tweaks like the password-visibility toggle, which mutate the DOM directly
+// so a full re-render doesn't wipe out whatever the user already typed).
+let user = null
+let authMode = 'login' // 'login' | 'register'
+let error = ''
+let notice = ''
+let languagesPageError = ''
+let selectedLanguages = []
+let selectedGoal = 'steady' // 'chill' | 'steady' | 'serious' — synced from user.dailyGoalTier, persisted via updateLanguages/saveOnboarding
+
+// Onboarding is 2 steps: 1 = avatar pick (new), 2 = languages + daily goal
+// (the whole page this used to be). Not persisted server-side — a refresh
+// mid-onboarding restarts at step 1, which is an acceptable tradeoff (see
+// handleAvatarStepNext, which just claims another free starter avatar in
+// that rare case, no real harm done).
+let onboardingStep = 1
+let onboardingAvatarChoice = 'bottts'
+let onboardingAvatarError = ''
+let onboardingAvatarSaving = false
+
+// Home page state
+let homePageData = null
+let homePageLoading = false
+let homePageError = ''
+let trackFilter = 'all' // 'all' | 'in-progress' | 'not-started'
+
+// Course/sidebar state — populated lazily as tracks are expanded or a lesson
+// is opened, just displayed by render(). Kept separate from the render cycle
+// so navigating/expanding doesn't re-fetch data that's already loaded.
+let chaptersByLanguage = {} // { [language]: chapters[] } — cache, one entry per expanded track
+let expandedTracks = new Set() // which languages' trees are open in the sidebar
+let expandedChapters = new Set() // which "language/chapterSlug" groups are open
+let currentCourseLanguage = null // language of the lesson currently open, if any
+let courseTopic = null
+let courseTopicKey = null
+let courseError = ''
+let courseLoading = false
+let leaveDialogOpen = false
+
+// Mobile sidebar state — the persistent sidebar becomes an overlay below
+// 768px, toggled via a hamburger button in the topbar (see renderAppShell).
+let mobileMenuOpen = false
+
+// Playground state
+let playgroundLanguage = null
+let playgroundEditor = null // the mounted CodeMirror EditorView, if any
+let playgroundCode = {} // { [language]: code } — cache so switching languages doesn't lose work
+let playgroundRunning = false
+let playgroundResult = null
+let playgroundError = ''
+
+// Mini playground state — a small floating scratchpad reachable from the
+// topbar's "Try it yourself" button on any page. Mirrors the main
+// Playground's current language but keeps its own separate code/output, since
+// the two can be open side by side (e.g. on the Playground page itself).
+let miniPlaygroundOpen = false
+let miniPlaygroundExpanded = false
+let miniPlaygroundEditor = null
+let miniPlaygroundCode = {} // { [language]: code }
+let miniPlaygroundRunning = false
+let miniPlaygroundResult = null
+let miniPlaygroundError = ''
+
+// Quiz state
+let quizProgressByLanguage = {} // { [language]: { [chapterSlug/topicSlug]: {currentBand, mastered} } } — cache
+let quizSearch = ''
+let quizLanguageFilter = 'all'
+
+let quizRoute = null // { language, chapterSlug, topicSlug } for the session currently loaded
+let quizQuestion = null
+let quizSessionInfo = null // { currentBand, questionsAnswered, cap, rawPoints, penaltyPercent }
+let quizSelectedChoice = null
+let quizAnswerResult = null // response from submitQuizAnswer, once the current question has been checked
+let quizHint = null
+let quizRoundComplete = null // { bankedPoints, totalPoints } shown right after a round finishes
+let quizLoading = false
+let quizError = ''
+
+// Cosmetics page state — the buy-catalog (background/border/theme) PLUS
+// the user's own avatar pulls, shown together so this one page can browse
+// and equip everything, not just what's purchasable.
+let shopItems = null // catalog + avatars, annotated with owned/equipped, refetched after each action
+let shopLoading = false
+let shopCatalogSize = 0 // from the API — lets "X of Y owned" exclude the unbounded avatar pool
+let cosmeticsTab = 'everything' // 'everything' | 'avatar' | 'background' | 'border' | 'theme'
+let cosmeticsSearch = ''
+
+// Profile page state
+let profilePageData = null // { cosmetics, badges, streakFreezeCount, currentStreak, points, account } from GET /api/profile
+let profilePageLoading = false
+let profileInventoryTab = 'cosmetics' // 'cosmetics' | 'powerups' | 'badges'
+let deleteAccountDialogOpen = false
+
+// Toast notifications — a global stack (any page using renderAppShell can
+// trigger one), rendered bottom-right, auto-dismissing. Replaces the old
+// per-page inline green "notice-text" success messages (shop purchases,
+// avatar pulls, preference saves, points earned) with one consistent pattern.
+let toasts = [] // { id, message, icon }
+const TOAST_DURATION_MS = 4500
+
+function showToast(message, { icon = icons.check, variant = 'success' } = {}) {
+  const id = `${Date.now()}-${Math.random()}`
+  toasts = [...toasts, { id, message, icon, variant }]
+  render()
+  setTimeout(() => {
+    toasts = toasts.filter((t) => t.id !== id)
+    render()
+  }, TOAST_DURATION_MS)
+}
+
+function showErrorToast(message) {
+  showToast(message, { icon: icons.alertCircle, variant: 'error' })
+}
+
+function dismissToast(id) {
+  toasts = toasts.filter((t) => t.id !== id)
+  render()
+}
+
+function renderToasts() {
+  if (toasts.length === 0) return ''
+  return `
+    <div class="toast-stack">
+      ${toasts
+        .map(
+          (t) => `
+        <div class="toast-card ${t.variant === 'error' ? 'toast-error' : ''}" data-toast-id="${t.id}">
+          <span class="toast-icon">${t.icon}</span>
+          <p class="toast-message">${escapeHtml(t.message)}</p>
+          <button type="button" class="toast-close" data-toast-close="${t.id}">${icons.x}</button>
+        </div>
+      `
+        )
+        .join('')}
+    </div>
+  `
+}
+
+function setUser(updatedUser) {
+  user = updatedUser
+  selectedLanguages = [...updatedUser.languagesToLearn]
+  selectedGoal = updatedUser.dailyGoalTier || 'steady'
+}
+
+// Minimal hand-rolled router — no library, since there's only one dynamic
+// route shape. Anything under /course/... is the lesson page; everything
+// else is the existing login/onboarding/dashboard state machine.
+function parseRoute() {
+  const parts = window.location.pathname.split('/').filter(Boolean)
+  if (parts[0] === 'course' && parts[1]) {
+    return { name: 'course', language: decodeURIComponent(parts[1]), chapterSlug: parts[2], topicSlug: parts[3] }
+  }
+  if (parts[0] === 'playground') {
+    return { name: 'playground' }
+  }
+  if (parts[0] === 'languages') {
+    return { name: 'languages' }
+  }
+  if (parts[0] === 'cosmetics') {
+    return { name: 'cosmetics' }
+  }
+  if (parts[0] === 'profile') {
+    return { name: 'profile' }
+  }
+  if (parts[0] === 'quiz') {
+    if (parts[1] && parts[2] && parts[3]) {
+      return { name: 'quiz-session', language: decodeURIComponent(parts[1]), chapterSlug: parts[2], topicSlug: parts[3] }
+    }
+    return { name: 'quiz-collection' }
+  }
+  return { name: 'home' }
+}
+
+// ---- Mobile sidebar (overlay on small screens) ----
+
+function closeMobileMenu() {
+  mobileMenuOpen = false
+  document.body.classList.remove('mobile-menu-open')
+  /* Toggle classes directly on existing DOM elements instead of calling render().
+     Calling render() destroys/recreates the sidebar element, which kills the
+     CSS transition — the sidebar would "just appear" instead of sliding. */
+  const sidebar = document.querySelector('.app-sidebar')
+  const overlay = document.querySelector('#sidebar-overlay')
+  if (sidebar) sidebar.classList.remove('sidebar-open')
+  if (overlay) overlay.classList.remove('overlay-open')
+}
+
+function toggleMobileMenu() {
+  mobileMenuOpen = !mobileMenuOpen
+  if (mobileMenuOpen) {
+    document.body.classList.add('mobile-menu-open')
+  } else {
+    document.body.classList.remove('mobile-menu-open')
+  }
+  /* Toggle classes directly — no render() call. This lets the existing
+     sidebar element play its slide-in/out transition. */
+  const sidebar = document.querySelector('.app-sidebar')
+  const overlay = document.querySelector('#sidebar-overlay')
+  if (sidebar) sidebar.classList.toggle('sidebar-open', mobileMenuOpen)
+  if (overlay) overlay.classList.toggle('overlay-open', mobileMenuOpen)
+}
+
+function goToDashboard() {
+  leaveDialogOpen = false
+  closeMobileMenu()
+  window.history.pushState({}, '', '/')
+  render()
+}
+
+function goToPlayground() {
+  currentCourseLanguage = null
+  closeMobileMenu()
+  window.history.pushState({}, '', '/playground')
+  render()
+}
+
+function goToLanguagesPage() {
+  currentCourseLanguage = null
+  closeMobileMenu()
+  languagesPageError = ''
+  window.history.pushState({}, '', '/languages')
+  render()
+}
+
+function goToQuizCollection() {
+  currentCourseLanguage = null
+  closeMobileMenu()
+  window.history.pushState({}, '', '/quiz')
+  render()
+}
+
+function goToCosmeticsPage() {
+  currentCourseLanguage = null
+  closeMobileMenu()
+  window.history.pushState({}, '', '/cosmetics')
+  render()
+}
+
+function goToProfilePage() {
+  currentCourseLanguage = null
+  closeMobileMenu()
+  window.history.pushState({}, '', '/profile')
+  render()
+}
+
+function goToQuizSession(language, chapterSlug, topicSlug) {
+  currentCourseLanguage = null
+  closeMobileMenu()
+  window.history.pushState({}, '', `/quiz/${encodeURIComponent(language)}/${chapterSlug}/${topicSlug}`)
+  startQuizSession({ language, chapterSlug, topicSlug })
+}
+
+function openLeaveDialog() {
+  leaveDialogOpen = true
+  render()
+}
+
+function closeLeaveDialog() {
+  leaveDialogOpen = false
+  render()
+}
+
+window.addEventListener('popstate', () => {
+  closeMobileMenu()
+  const route = parseRoute()
+  if (route.name === 'course' && user?.hasCompletedOnboarding) {
+    goToCourse(route)
+  } else {
+    render()
+  }
+})
+
+function render() {
+  if (!user) {
+    renderAuthPage()
+  } else if (!user.hasCompletedOnboarding) {
+    renderOnboardingPage()
+  } else if (parseRoute().name === 'course') {
+    renderCoursePage(parseRoute())
+  } else if (parseRoute().name === 'playground') {
+    renderPlaygroundPage()
+  } else if (parseRoute().name === 'languages') {
+    renderLanguagesPage()
+  } else if (parseRoute().name === 'cosmetics') {
+    renderCosmeticsPage()
+  } else if (parseRoute().name === 'profile') {
+    renderProfilePage()
+  } else if (parseRoute().name === 'quiz-collection') {
+    renderQuizCollectionPage()
+  } else if (parseRoute().name === 'quiz-session') {
+    renderQuizSessionPage(parseRoute())
+  } else {
+    renderDashboardPage()
+  }
+}
+
+// ---- Shared pieces ----
+
+// A real DiceBear avatar (no npm dependency — just an <img src> against the
+// public HTTP API) when the user has a seed, falling back to the existing
+// initial-letter circle if there's no seed yet or the image fails to load
+// (onerror flips a class rather than swapping innerHTML, so no inline-JS
+// string-escaping games are needed). Equipped border/background cosmetics
+// (see the shop) are applied as inline styles since their values are
+// per-user, not theme tokens.
+function renderAvatar(u, { size = 36 } = {}) {
+  const borderColor = u.equippedCosmetics?.border?.value || 'var(--border-accent)'
+  const glow = u.equippedCosmetics?.background?.value
+  const glowStyle = glow ? `box-shadow: 0 0 0 6px ${glow}33, 0 0 16px 2px ${glow}66;` : ''
+  const initial = u.name.charAt(0).toUpperCase()
+  const fallback = `<div class="icon-btn avatar-fallback" style="width:${size}px; height:${size}px; border-color:${borderColor}; font-weight:700;">${initial}</div>`
+
+  if (!u.avatarSeed || !u.avatarStyle) return `<div style="${glowStyle} border-radius:999px;">${fallback}</div>`
+
+  const src = `https://api.dicebear.com/9.x/${u.avatarStyle}/svg?seed=${encodeURIComponent(u.avatarSeed)}`
+  return `
+    <div class="avatar-wrap" style="width:${size}px; height:${size}px; ${glowStyle}">
+      <img class="avatar-img" src="${src}" style="border-color:${borderColor};" onerror="this.closest('.avatar-wrap').classList.add('avatar-img-failed')" />
+      ${fallback}
+    </div>
+  `
+}
+
+function themeToggleButton(id = 'theme-toggle') {
+  return `<button id="${id}" class="icon-btn" title="Toggle theme">${
+    currentTheme() === 'dark' ? icons.sun : icons.moon
+  }</button>`
+}
+
+function bindThemeToggle(id = 'theme-toggle') {
+  document.querySelector(`#${id}`).addEventListener('click', () => {
+    toggleTheme()
+    render()
+  })
+}
+
+// ---- App shell (persistent sidebar + topbar, dashboard + course pages) ----
+
+function renderSidebarTracks() {
+  return selectedLanguages
+    .map((lang) => {
+      const langMeta = SUPPORTED_LANGUAGES.find((l) => l.name === lang)
+      const expanded = expandedTracks.has(lang)
+      const chapters = chaptersByLanguage[lang]
+
+      let treeHtml = ''
+      if (expanded) {
+        if (!chapters) {
+          treeHtml = '<p class="sidebar-loading">Loading…</p>'
+        } else if (chapters.length === 0) {
+          treeHtml = '<p class="sidebar-loading">No chapters yet.</p>'
+        } else {
+          treeHtml = chapters.map((chapter) => renderSidebarChapter(lang, chapter)).join('')
+        }
+      }
+
+      return `
+        <div class="sidebar-track">
+          <button type="button" class="sidebar-track-header" data-lang="${lang}">
+            <span class="lang-glyph sidebar-track-glyph" style="background:${langMeta.color}">${langMeta.glyph}</span>
+            <span class="sidebar-track-name">${lang}</span>
+            <span class="sidebar-chevron ${expanded ? 'open' : ''}">${icons.chevronDown}</span>
+          </button>
+          ${expanded ? `<div class="sidebar-tree">${treeHtml}</div>` : ''}
+        </div>
+      `
+    })
+    .join('')
+}
+
+function renderSidebarChapter(lang, chapter) {
+  const chapterKey = `${lang}/${chapter.slug}`
+  const chapterExpanded = expandedChapters.has(chapterKey)
+
+  const topicsHtml = chapterExpanded
+    ? chapter.topics
+        .map((topic) => {
+          const active =
+            currentCourseLanguage === lang &&
+            courseTopic &&
+            courseTopic.chapterSlug === chapter.slug &&
+            courseTopic.slug === topic.slug
+          const status = quizProgressByLanguage[lang]?.[`${chapter.slug}/${topic.slug}`]
+          const statusClass = status ? (status.mastered ? 'mastered' : 'in-progress') : ''
+          const statusIcon = status ? (status.mastered ? icons.check : icons.dot) : icons.circle
+          return `
+            <button type="button" class="sidebar-topic ${
+              active ? 'active' : ''
+            }" data-lang="${lang}" data-chapter="${chapter.slug}" data-topic="${topic.slug}">
+              <span class="topic-status ${statusClass}">${statusIcon}</span>
+              <span class="sidebar-topic-title">${topic.title}</span>
+            </button>
+          `
+        })
+        .join('')
+    : ''
+
+  return `
+    <div class="sidebar-chapter-group">
+      <button type="button" class="sidebar-chapter-header" data-lang="${lang}" data-chapter="${chapter.slug}">
+        <span class="sidebar-chevron sm ${chapterExpanded ? 'open' : ''}">${icons.chevronDown}</span>
+        <span class="sidebar-chapter-name">${chapter.title}</span>
+        <span class="sidebar-chapter-count">${chapter.topics.length}</span>
+      </button>
+      ${chapterExpanded ? `<div class="sidebar-topics">${topicsHtml}</div>` : ''}
+    </div>
+  `
+}
+
+async function toggleTrack(lang) {
+  if (expandedTracks.has(lang)) {
+    expandedTracks.delete(lang)
+    render()
+    return
+  }
+  expandedTracks.add(lang)
+  render()
+  if (!chaptersByLanguage[lang]) {
+    try {
+      const { chapters } = await fetchChapters(lang)
+      chaptersByLanguage[lang] = chapters
+    } catch {
+      chaptersByLanguage[lang] = []
+    }
+    render()
+  }
+  if (!quizProgressByLanguage[lang]) {
+    try {
+      const { progress } = await fetchQuizProgress(lang)
+      quizProgressByLanguage[lang] = progress
+    } catch {
+      quizProgressByLanguage[lang] = {}
+    }
+    render()
+  }
+}
+
+function toggleChapter(lang, chapterSlug) {
+  const key = `${lang}/${chapterSlug}`
+  if (expandedChapters.has(key)) {
+    expandedChapters.delete(key)
+  } else {
+    expandedChapters.add(key)
+  }
+  render()
+}
+
+function renderAppShell({ topLabel, mainHtml }) {
+  const routeName = parseRoute().name
+  return `
+    <div class="app-shell">
+      <div class="sidebar-overlay ${mobileMenuOpen ? 'overlay-open' : ''}" id="sidebar-overlay"></div>
+      <aside class="app-sidebar ${mobileMenuOpen ? 'sidebar-open' : ''}">
+        <button type="button" class="sidebar-close-btn" id="sidebar-close" title="Close menu">${icons.x}</button>
+        <div class="brand-logo brand-logo-sm sidebar-logo">code<span>pilot</span></div>
+        <nav class="sidebar-nav">
+          <button type="button" class="sidebar-nav-item ${
+            routeName === 'home' || routeName === 'languages' ? 'active' : ''
+          }" id="nav-home">${icons.home} Home</button>
+          <button type="button" class="sidebar-nav-item">${icons.compass} Explore tracks</button>
+          <button type="button" class="sidebar-nav-item ${
+            routeName === 'quiz-collection' || routeName === 'quiz-session' ? 'active' : ''
+          }" id="nav-quiz">${icons.clipboardList} Quiz collection</button>
+          <button type="button" class="sidebar-nav-item ${
+            routeName === 'playground' ? 'active' : ''
+          }" id="nav-playground">${icons.terminal} Playground</button>
+          <button type="button" class="sidebar-nav-item ${
+            routeName === 'cosmetics' ? 'active' : ''
+          }" id="nav-cosmetics">${icons.shoppingBag} Cosmetics</button>
+        </nav>
+        <div class="sidebar-section-label">My tracks</div>
+        <div class="sidebar-tracks">${renderSidebarTracks()}</div>
+        <button type="button" class="sidebar-nav-item sidebar-add-lang" id="nav-add-language">${
+          icons.plus
+        } Add a language</button>
+        <button type="button" class="sidebar-nav-item ${
+          routeName === 'profile' ? 'active' : ''
+        }" id="nav-profile">${icons.person} Profile</button>
+        <button type="button" class="sidebar-nav-item sidebar-logout" id="nav-logout">${icons.logout} Log out</button>
+      </aside>
+      <div class="app-main">
+        <div class="app-topbar">
+          <button type="button" class="mobile-menu-toggle" id="mobile-menu-toggle" title="Open menu">${
+            icons.menu
+          }</button>
+          <span class="app-top-label">${topLabel}</span>
+          <div style="display:flex; align-items:center; gap:0.6rem;">
+            <span class="stat-pill"><span class="stat-icon-flame">${icons.flame}</span>${user.currentStreak}</span>
+            <span class="stat-pill"><span class="stat-icon-gem">${icons.gem}</span>${user.points.toLocaleString()}</span>
+            ${themeToggleButton()}
+            <button type="button" class="btn btn-primary btn-sm topbar-try-btn" id="try-it-yourself">${
+              icons.person
+            } <span class="try-btn-text">Try it yourself</span></button>
+            <button type="button" class="bell-btn" title="Notifications">${icons.bell}</button>
+            ${renderAvatar(user)}
+          </div>
+        </div>
+        <div class="app-content">${mainHtml}</div>
+      </div>
+      ${renderMiniPlayground()}
+      ${renderToasts()}
+    </div>
+  `
+}
+
+function bindAppShell() {
+  bindThemeToggle()
+  const menuToggle = document.querySelector('#mobile-menu-toggle')
+  if (menuToggle) menuToggle.addEventListener('click', toggleMobileMenu)
+  const sidebarClose = document.querySelector('#sidebar-close')
+  if (sidebarClose) sidebarClose.addEventListener('click', closeMobileMenu)
+  const sidebarOverlay = document.querySelector('#sidebar-overlay')
+  if (sidebarOverlay) sidebarOverlay.addEventListener('click', closeMobileMenu)
+  document.querySelector('#nav-home').addEventListener('click', goToDashboard)
+  document.querySelector('#nav-playground').addEventListener('click', goToPlayground)
+  document.querySelector('#nav-add-language').addEventListener('click', goToLanguagesPage)
+  document.querySelector('#nav-quiz').addEventListener('click', goToQuizCollection)
+  document.querySelector('#nav-cosmetics').addEventListener('click', goToCosmeticsPage)
+  document.querySelector('#nav-profile').addEventListener('click', goToProfilePage)
+  document.querySelector('#nav-logout').addEventListener('click', handleLogout)
+  document.querySelector('#try-it-yourself').addEventListener('click', toggleMiniPlayground)
+  document.querySelectorAll('.sidebar-track-header').forEach((btn) => {
+    btn.addEventListener('click', () => toggleTrack(btn.dataset.lang))
+  })
+  document.querySelectorAll('.sidebar-chapter-header').forEach((btn) => {
+    btn.addEventListener('click', () => toggleChapter(btn.dataset.lang, btn.dataset.chapter))
+  })
+  document.querySelectorAll('.sidebar-topic').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      closeMobileMenu()
+      openTopic(btn.dataset.lang, btn.dataset.chapter, btn.dataset.topic)
+    })
+  })
+  if (miniPlaygroundOpen) {
+    bindMiniPlayground()
+    mountMiniPlaygroundEditor()
+  }
+  document.querySelectorAll('[data-toast-close]').forEach((btn) => {
+    btn.addEventListener('click', () => dismissToast(btn.dataset.toastClose))
+  })
+}
+
+function renderBrandPanel() {
+  return `
+    <div class="brand-panel">
+      <div class="brand-logo">code<span>pilot</span></div>
+      <div>
+        <h1 class="brand-headline">Learn to code<br />between lectures.</h1>
+        <p class="brand-subtext">Short chapters, real exercises in the browser, and an explanation every time you get one wrong.</p>
+        <div class="code-card">
+          <div class="code-card-tab">${icons.file} day-01.js</div>
+          <div class="code-card-body">
+            <div><span class="code-keyword">const</span> streak = 1;</div>
+            <div class="code-comment">// keep going tomorrow</div>
+          </div>
+        </div>
+      </div>
+      <div class="brand-footer">
+        <span class="badge">${icons.graduationCap} 18,400 students</span>
+        <span class="brand-footer-note">Free for university accounts</span>
+      </div>
+    </div>
+  `
+}
+
+// ---- Auth (login / register) ----
+
+function renderAuthPage() {
+  app.innerHTML = `
+    <div class="auth-shell">
+      ${renderBrandPanel()}
+      <div class="form-panel">
+        <div class="form-topbar">
+          <a href="#" id="topbar-auth-link" class="pill-link"><span class="pill-dot"></span> ${
+            authMode === 'login' ? 'Register' : 'Log in'
+          }</a>
+          ${themeToggleButton()}
+        </div>
+        <div class="form-card">
+          ${authMode === 'login' ? renderLoginForm() : renderRegisterForm()}
+        </div>
+      </div>
+    </div>
+  `
+  bindThemeToggle()
+  document.querySelector('#topbar-auth-link').addEventListener('click', (e) => {
+    e.preventDefault()
+    switchAuthMode()
+  })
+  document.querySelector('#auth-form').addEventListener('submit', handleAuthSubmit)
+  document.querySelector('#switch-mode').addEventListener('click', (e) => {
+    e.preventDefault()
+    switchAuthMode()
+  })
+  const oauthBtn = document.querySelector('#oauth-btn')
+  if (oauthBtn) {
+    oauthBtn.addEventListener('click', (e) => {
+      e.preventDefault()
+      notice = ''
+      error = "GitHub sign-in isn't available yet."
+      render()
+    })
+  }
+  const forgotLink = document.querySelector('#forgot-password')
+  if (forgotLink) {
+    forgotLink.addEventListener('click', (e) => {
+      e.preventDefault()
+      notice = ''
+      error = "Password reset isn't available yet."
+      render()
+    })
+  }
+  const passwordToggle = document.querySelector('#toggle-password-visibility')
+  if (passwordToggle) {
+    passwordToggle.addEventListener('click', () => {
+      const input = document.querySelector('#login-password')
+      const showing = input.type === 'text'
+      input.type = showing ? 'password' : 'text'
+      passwordToggle.innerHTML = showing ? icons.eye : icons.eyeOff
+    })
+  }
+}
+
+function switchAuthMode() {
+  authMode = authMode === 'login' ? 'register' : 'login'
+  error = ''
+  notice = ''
+  render()
+}
+
+function renderLoginForm() {
+  return `
+    <h1 class="form-title">Welcome back</h1>
+    <p class="form-subtext">Good to see you again — let's keep the streak going.</p>
+    <form id="auth-form" class="form-fields">
+      <div>
+        <label class="field-label" for="email">Email</label>
+        <div class="input-wrap">
+          <span class="input-icon">${icons.envelope}</span>
+          <input id="email" name="email" type="email" placeholder="you@uni.edu" required class="input input-with-icon" />
+        </div>
+      </div>
+      <div>
+        <label class="field-label" for="login-password">Password</label>
+        <div class="input-wrap">
+          <input id="login-password" name="password" type="password" placeholder="Password" required class="input input-with-icon-right" />
+          <button type="button" id="toggle-password-visibility" class="input-icon-right">${icons.eye}</button>
+        </div>
+      </div>
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <label class="checkbox-row">
+          <input type="checkbox" name="keepSignedIn" checked />
+          Keep me signed in
+        </label>
+        <a href="#" id="forgot-password" style="font-size:0.8125rem; color: var(--text-link); text-decoration:none;">Forgot password?</a>
+      </div>
+      <button type="submit" class="btn btn-primary">Log in</button>
+    </form>
+    ${error ? `<p class="error-text" style="margin-top:0.75rem;">${error}</p>` : ''}
+    ${notice ? `<p class="notice-text" style="margin-top:0.75rem;">${notice}</p>` : ''}
+    <div class="divider">or</div>
+    <button type="button" id="oauth-btn" class="btn btn-secondary">${icons.github} Continue with GitHub</button>
+    <p class="footer-note">New here? <a href="#" id="switch-mode">Create an account</a></p>
+  `
+}
+
+function renderRegisterForm() {
+  return `
+    <h1 class="form-title">Create your account</h1>
+    <p class="form-subtext">Free with a university email. Takes about a minute.</p>
+    <form id="auth-form" class="form-fields">
+      <div>
+        <label class="field-label" for="name">Name</label>
+        <div class="input-wrap">
+          <span class="input-icon">${icons.person}</span>
+          <input id="name" name="name" type="text" placeholder="Maya Okoro" required class="input input-with-icon" />
+        </div>
+      </div>
+      <div>
+        <label class="field-label" for="reg-email">University email</label>
+        <div class="input-wrap">
+          <span class="input-icon">${icons.envelope}</span>
+          <input id="reg-email" name="email" type="email" placeholder="you@uni.edu" required class="input input-with-icon" />
+        </div>
+        <p class="helper-text">We use this to verify your student status.</p>
+      </div>
+      <div>
+        <label class="field-label" for="reg-password">Password</label>
+        <input id="reg-password" name="password" type="password" placeholder="8+ characters" required minlength="8" class="input" />
+      </div>
+      <label class="checkbox-row">
+        <input type="checkbox" name="agree" required />
+        I agree to the terms and privacy notice
+      </label>
+      <button type="submit" class="btn btn-primary">Create account ${icons.arrowRight}</button>
+    </form>
+    ${error ? `<p class="error-text" style="margin-top:0.75rem;">${error}</p>` : ''}
+    ${notice ? `<p class="notice-text" style="margin-top:0.75rem;">${notice}</p>` : ''}
+    <div class="divider">or</div>
+    <button type="button" id="oauth-btn" class="btn btn-secondary">${icons.github} Sign up with GitHub</button>
+    <p class="footer-note">Already have an account? <a href="#" id="switch-mode">Log in</a></p>
+  `
+}
+
+async function handleAuthSubmit(e) {
+  e.preventDefault()
+  const payload = Object.fromEntries(new FormData(e.target))
+
+  try {
+    if (authMode === 'register') {
+      await register(payload)
+      authMode = 'login'
+      error = ''
+      notice = 'Account created — log in below.'
+    } else {
+      const { user: loggedInUser } = await login(payload)
+      setUser(loggedInUser)
+      error = ''
+      notice = ''
+    }
+  } catch (err) {
+    error = err.message
+    notice = ''
+  }
+  render()
+}
+
+// ---- Shared language tile grid (onboarding + dashboard settings) ----
+
+function renderLangGrid(gridId) {
+  const tiles = SUPPORTED_LANGUAGES.map((lang) => {
+    const selected = selectedLanguages.includes(lang.name)
+    return `
+      <button type="button" class="lang-tile ${selected ? 'selected' : ''}" data-lang="${lang.name}">
+        <span class="lang-radio">${selected ? icons.check : ''}</span>
+        <span class="lang-glyph" style="background:${lang.color}">${lang.glyph}</span>
+        <div class="lang-name">${lang.name}</div>
+        <div class="lang-meta">${lang.chapters} chapters &middot; ${lang.topics} topics</div>
+      </button>
+    `
+  }).join('')
+  return `<div class="lang-grid" id="${gridId}">${tiles}</div>`
+}
+
+function bindLangGrid(gridId, onChange) {
+  document.querySelector(`#${gridId}`).addEventListener('click', (e) => {
+    const tile = e.target.closest('.lang-tile')
+    if (!tile) return
+    const lang = tile.dataset.lang
+    selectedLanguages = selectedLanguages.includes(lang)
+      ? selectedLanguages.filter((l) => l !== lang)
+      : [...selectedLanguages, lang]
+    onChange()
+  })
+}
+
+function topicsUnlocked() {
+  return SUPPORTED_LANGUAGES.filter((lang) => selectedLanguages.includes(lang.name)).reduce(
+    (sum, lang) => sum + lang.topics,
+    0
+  )
+}
+
+// ---- Onboarding (first login only) ----
+
+// Onboarding is 2 steps — step 1 (new) picks a free starter avatar, step 2
+// is languages + daily goal (the whole page this used to be, single-step).
+function renderOnboardingPage() {
+  if (onboardingStep === 1) {
+    renderOnboardingAvatarStep()
+  } else {
+    renderOnboardingLanguagesStep()
+  }
+}
+
+// A small fixed set (not the full random AVATAR_STYLES pool) with a fixed
+// seed, matching shopController.js's STARTER_AVATAR_OPTIONS exactly — keeps
+// the picker's preview deterministic rather than reflecting a real random pull.
+const STARTER_AVATAR_CHOICES = [
+  { style: 'bottts', label: 'Bot', description: 'Robot heads' },
+  { style: 'adventurer', label: 'Adventurer', description: 'Illustrated faces' },
+  { style: 'notionists', label: 'Notionist', description: 'Line drawn' },
+]
+const STARTER_AVATAR_SEED = 'starter'
+
+function renderOnboardingAvatarStep() {
+  const previewUser = { ...user, avatarStyle: onboardingAvatarChoice, avatarSeed: STARTER_AVATAR_SEED }
+  const selectedMeta = STARTER_AVATAR_CHOICES.find((c) => c.style === onboardingAvatarChoice)
+
+  const cardsHtml = STARTER_AVATAR_CHOICES.map((choice) => {
+    const selected = onboardingAvatarChoice === choice.style
+    const cardPreviewUser = { ...user, avatarStyle: choice.style, avatarSeed: STARTER_AVATAR_SEED }
+    return `
+      <button type="button" class="onboarding-avatar-card ${
+        selected ? 'selected' : ''
+      }" data-style="${choice.style}">
+        <span class="onboarding-avatar-check">${selected ? icons.check : ''}</span>
+        ${renderAvatar(cardPreviewUser, { size: 72 })}
+        <p class="lang-name" style="margin-top:0.75rem; margin-bottom:0.15rem;">${choice.label}</p>
+        <p class="lang-meta">${choice.description}</p>
+      </button>
+    `
+  }).join('')
+
+  app.innerHTML = `
+    <div class="onboarding-page">
+      <div class="onboarding-topbar">
+        <div class="onboarding-topbar-left">
+          <div class="brand-logo brand-logo-sm">code<span>pilot</span></div>
+          <span class="setup-chip">&bull; First-time setup</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:0.6rem;">
+          ${themeToggleButton()}
+          ${renderAvatar(previewUser)}
+        </div>
+      </div>
+      <div class="onboarding-body">
+        <p class="eyebrow">WELCOME, ${user.name.toUpperCase()} &middot; STEP 1 OF 2</p>
+        <h1 class="onboarding-heading">Pick your avatar.</h1>
+        <p class="onboarding-subtext">This is how you show up on leaderboards. Three to start with — you can change it, and unlock more, from your profile.</p>
+
+        <div class="progress-row">
+          <span>Setting up your account</span>
+          <span>Step 1 of 2</span>
+        </div>
+        <div class="progress-track"><div class="progress-fill" style="width:50%"></div></div>
+
+        <div class="onboarding-avatar-grid">${cardsHtml}</div>
+
+        <div class="onboarding-avatar-footer">
+          <div class="onboarding-avatar-footer-preview">
+            ${renderAvatar(previewUser, { size: 28 })}
+            <span>${selectedMeta.label} selected</span>
+          </div>
+          <button type="button" id="onboarding-avatar-next" class="btn btn-primary btn-sm" ${
+            onboardingAvatarSaving ? 'disabled' : ''
+          }>Next &mdash; pick your languages ${icons.arrowRight}</button>
+        </div>
+        <p class="onboarding-hint">More avatars and cosmetics unlock with points in the shop.</p>
+        ${onboardingAvatarError ? `<p class="error-text">${escapeHtml(onboardingAvatarError)}</p>` : ''}
+      </div>
+    </div>
+  `
+  bindThemeToggle()
+  document.querySelectorAll('.onboarding-avatar-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      onboardingAvatarChoice = card.dataset.style
+      render()
+    })
+  })
+  document.querySelector('#onboarding-avatar-next').addEventListener('click', handleAvatarStepNext)
+}
+
+async function handleAvatarStepNext() {
+  onboardingAvatarError = ''
+  onboardingAvatarSaving = true
+  render()
+  try {
+    const result = await claimStarterAvatar(onboardingAvatarChoice)
+    user.avatarStyle = result.avatarStyle
+    user.avatarSeed = result.avatarSeed
+    onboardingStep = 2
+  } catch (err) {
+    onboardingAvatarError = err.message
+  }
+  onboardingAvatarSaving = false
+  render()
+}
+
+function renderOnboardingLanguagesStep() {
+  const chips = selectedLanguages
+    .map(
+      (lang) =>
+        `<span class="chip">${lang}<button type="button" data-lang="${lang}" class="remove-chip">${icons.x}</button></span>`
+    )
+    .join('')
+
+  app.innerHTML = `
+    <div class="onboarding-page">
+      <div class="onboarding-topbar">
+        <div class="onboarding-topbar-left">
+          <div class="brand-logo brand-logo-sm">code<span>pilot</span></div>
+          <span class="setup-chip">&bull; First-time setup</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:0.6rem;">
+          <span class="stat-pill"><span class="stat-icon-flame">${icons.flame}</span>${user.currentStreak}</span>
+          <span class="stat-pill"><span class="stat-icon-gem">${icons.gem}</span>${user.points.toLocaleString()}</span>
+          ${themeToggleButton()}
+          <button type="button" class="bell-btn" title="Notifications">${icons.bell}</button>
+          ${renderAvatar(user)}
+        </div>
+      </div>
+      <div class="onboarding-body">
+        <p class="eyebrow">WELCOME, ${user.name.toUpperCase()} &middot; STEP 2 OF 2</p>
+        <h1 class="onboarding-heading">What do you want to learn?</h1>
+        <p class="onboarding-subtext">Pick as many languages as you like — each one adds its chapters and topics to your sidebar. You can add or drop a language any time from your settings.</p>
+
+        <div class="progress-row">
+          <span>Setting up your account</span>
+          <span>Step 2 of 2</span>
+        </div>
+        <div class="progress-track"><div class="progress-fill" style="width:100%"></div></div>
+
+        ${renderLangGrid('onboarding-lang-grid')}
+
+        <div class="goal-card">
+          <p class="goal-title">How hard do you want to push?</p>
+          <p class="goal-subtext">This only sets your daily goal — nothing is locked either way</p>
+          <div class="goal-options">
+            ${renderGoalOption('chill', 'Chill', '1 topic a day')}
+            ${renderGoalOption('steady', 'Steady', '2 topics a day')}
+            ${renderGoalOption('serious', 'Serious', '4 topics a day')}
+          </div>
+        </div>
+      </div>
+      <div class="onboarding-footer">
+        <div class="onboarding-footer-row">
+          <div class="chip-row">${chips}</div>
+          <div class="onboarding-footer-right">
+            <span class="topics-unlocked">${topicsUnlocked()} topics unlocked</span>
+            <button type="button" id="finish-onboarding" class="btn btn-primary" ${
+              selectedLanguages.length === 0 ? 'disabled' : ''
+            }>Go to my dashboard ${icons.arrowRight}</button>
+          </div>
+        </div>
+        <p class="onboarding-hint">You only see this screen on your first login.</p>
+        ${error ? `<p class="error-text" style="text-align:center; margin:0;">${error}</p>` : ''}
+      </div>
+    </div>
+  `
+  bindThemeToggle()
+  bindLangGrid('onboarding-lang-grid', render)
+  document.querySelectorAll('.remove-chip').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      selectedLanguages = selectedLanguages.filter((l) => l !== btn.dataset.lang)
+      render()
+    })
+  })
+  document.querySelectorAll('input[name="dailyGoal"]').forEach((radio) => {
+    radio.addEventListener('change', (e) => {
+      selectedGoal = e.target.value
+      render()
+    })
+  })
+  document.querySelector('#finish-onboarding').addEventListener('click', handleFinishOnboarding)
+}
+
+function renderGoalOption(value, title, subtext) {
+  const checked = selectedGoal === value ? 'checked' : ''
+  return `
+    <label class="goal-option">
+      <input type="radio" name="dailyGoal" value="${value}" ${checked} />
+      <span>
+        <span class="goal-option-title">${title}</span><br />
+        <span class="goal-option-subtext">${subtext}</span>
+      </span>
+    </label>
+  `
+}
+
+async function handleFinishOnboarding() {
+  try {
+    const { user: updatedUser } = await saveOnboarding(selectedLanguages, selectedGoal)
+    setUser(updatedUser)
+    error = ''
+  } catch (err) {
+    error = err.message
+  }
+  render()
+}
+
+// ---- Dashboard ----
+
+function homeDataReady() {
+  return homePageData !== null
+}
+
+async function loadHomeData() {
+  homePageLoading = true
+  try {
+    homePageData = await fetchHome()
+  } catch (err) {
+    homePageError = err.message
+    homePageData = {
+      currentStreak: 0,
+      streakIncreasedToday: false,
+      points: 0,
+      pointsThisWeek: 0,
+      topicsCompletedTotal: 0,
+      topicsCompletedToday: 0,
+      dailyGoalTarget: 2,
+      topicsLeftToday: 2,
+      weekActivity: [],
+      daysPractisedThisWeek: 0,
+      streakFreezeCount: 0,
+      lastViewedTopic: null,
+      tracks: [],
+      quizSummary: { totalTopics: 0, masteredCount: 0, languagesCount: 0 },
+    }
+  }
+  homePageLoading = false
+  render()
+}
+
+function getGreetingWord() {
+  const hour = new Date().getHours()
+  if (hour < 12) return 'Morning'
+  if (hour < 18) return 'Afternoon'
+  return 'Evening'
+}
+
+function getDayTimeLabel() {
+  const now = new Date()
+  const day = now.toLocaleDateString(undefined, { weekday: 'long' }).toUpperCase()
+  const time = now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })
+  return `${day} &middot; ${time}`
+}
+
+const WEEKDAY_LETTERS = ['M', 'T', 'W', 'T', 'F', 'S', 'S']
+
+function renderHomeTrackTile(track) {
+  const statusLabel = track.started ? track.currentChapterLabel : 'Not started'
+  return `
+    <button type="button" class="lang-tile home-track-tile" data-lang="${track.language}">
+      <span class="lang-glyph" style="background:${track.color}">${track.glyph}</span>
+      <div class="lang-name">${track.language}</div>
+      <div class="lang-meta" style="margin-bottom:0.6rem;">${statusLabel}</div>
+      <div class="progress-track" style="margin-bottom:0;">
+        <div class="progress-fill" style="width:${track.progressPercent}%"></div>
+      </div>
+    </button>
+  `
+}
+
+function renderDashboardPage() {
+  currentCourseLanguage = null
+
+  if (!homeDataReady()) {
+    app.innerHTML = renderAppShell({ topLabel: 'Home', mainHtml: '<p>Loading…</p>' })
+    bindAppShell()
+    if (!homePageLoading) loadHomeData()
+    return
+  }
+
+  const {
+    currentStreak,
+    streakIncreasedToday,
+    points,
+    pointsThisWeek,
+    topicsCompletedTotal,
+    topicsLeftToday,
+    weekActivity,
+    daysPractisedThisWeek,
+    streakFreezeCount,
+    lastViewedTopic,
+    tracks,
+    quizSummary,
+  } = homePageData
+
+  const firstName = user.name.split(' ')[0]
+  const goalSubtext =
+    topicsLeftToday === 0
+      ? "Today's goal is done — nice work."
+      : `${topicsLeftToday} topic${topicsLeftToday === 1 ? '' : 's'} left to hit today's goal.`
+
+  const matchingTrack = lastViewedTopic ? tracks.find((t) => t.language === lastViewedTopic.language) : null
+  const continueCta = lastViewedTopic
+    ? `<button type="button" class="btn btn-primary btn-sm home-continue-btn" id="home-continue-cta">${icons.arrowRight} Continue ${
+        matchingTrack ? matchingTrack.currentChapterLabel : lastViewedTopic.chapterTitle
+      }</button>`
+    : ''
+
+  const resumeCardHtml = lastViewedTopic
+    ? `
+      <div class="profile-card home-resume-card">
+        <div class="home-resume-header">
+          <p class="lang-name" style="margin-bottom:0;">Pick up where you left off</p>
+          <span class="shop-cost-pill">${lastViewedTopic.currentChapterLabel || lastViewedTopic.chapterTitle}</span>
+        </div>
+        <p class="lang-meta" style="margin-bottom:1rem;">${lastViewedTopic.language} &middot; ${escapeHtml(
+          lastViewedTopic.chapterTitle
+        )}</p>
+        <div class="home-resume-row">
+          <span class="lang-glyph" style="background:${
+            SUPPORTED_LANGUAGES.find((l) => l.name === lastViewedTopic.language)?.color || '#888'
+          }">${SUPPORTED_LANGUAGES.find((l) => l.name === lastViewedTopic.language)?.glyph || ''}</span>
+          <div style="flex:1; min-width:0;">
+            <p class="lang-name" style="margin-bottom:0.15rem;">${escapeHtml(lastViewedTopic.topicTitle)}</p>
+            <p class="lang-meta">${lastViewedTopic.readingMinutes} min &middot; ${
+              lastViewedTopic.questionCount
+            } question${lastViewedTopic.questionCount === 1 ? '' : 's'}</p>
+          </div>
+          <button type="button" class="btn btn-primary btn-sm" id="home-resume-btn">Resume ${icons.arrowRight}</button>
+        </div>
+        <div class="home-resume-footer">
+          <span class="lang-meta">Chapter progress</span>
+          <span class="lang-meta">${lastViewedTopic.chapterProgressPercent}%</span>
+        </div>
+        <div class="progress-track" style="margin-bottom:0;">
+          <div class="progress-fill" style="width:${lastViewedTopic.chapterProgressPercent}%"></div>
+        </div>
+      </div>
+    `
+    : `
+      <div class="profile-card home-resume-card">
+        <p class="lang-name">Pick up where you left off</p>
+        <p class="lang-meta" style="margin-bottom:1rem;">You haven't opened a lesson yet.</p>
+        <button type="button" class="btn btn-primary btn-sm" id="home-browse-tracks">Browse your tracks ${
+          icons.arrowRight
+        }</button>
+      </div>
+    `
+
+  const weekCalendarHtml = weekActivity
+    .map((day, i) => {
+      const isToday = new Date(day.date).toDateString() === new Date().toDateString()
+      return `
+      <div class="home-week-day">
+        <span class="home-week-dot ${day.active ? 'active' : ''} ${isToday ? 'today' : ''}">${
+          day.active ? icons.flame : ''
+        }</span>
+        <span class="home-week-label">${WEEKDAY_LETTERS[i]}</span>
+      </div>
+    `
+    })
+    .join('')
+
+  const filteredTracks =
+    trackFilter === 'all'
+      ? tracks
+      : trackFilter === 'in-progress'
+        ? tracks.filter((t) => t.started)
+        : tracks.filter((t) => !t.started)
+
+  const mainHtml = `
+    <div class="home-greeting-row">
+      <div>
+        <p class="eyebrow">${getDayTimeLabel()}</p>
+        <h1 class="onboarding-heading" style="margin-bottom:0.25rem;">${getGreetingWord()}, ${escapeHtml(
+          firstName
+        )}.</h1>
+        <p class="lang-meta">${goalSubtext}</p>
+      </div>
+      ${continueCta}
+    </div>
+
+    ${homePageError ? `<p class="error-text">${escapeHtml(homePageError)}</p>` : ''}
+
+    <div class="profile-stat-row" style="margin-bottom: var(--sp-6);">
+      <div class="profile-stat-tile">
+        <div class="profile-stat-top-row">
+          <span class="stat-icon-gem">${icons.gem}</span>
+          <span class="profile-stat-number">${points.toLocaleString()}</span>
+        </div>
+        <p class="lang-meta">points${pointsThisWeek > 0 ? ` &middot; +${pointsThisWeek} this week` : ''}</p>
+      </div>
+      <div class="profile-stat-tile">
+        <div class="profile-stat-top-row">
+          <span class="stat-icon-flame">${icons.flame}</span>
+          <span class="profile-stat-number">${currentStreak}</span>
+        </div>
+        <p class="lang-meta">day streak${streakIncreasedToday ? ' &middot; +1 today' : ''}</p>
+      </div>
+      <div class="profile-stat-tile">
+        <div class="profile-stat-top-row">
+          <span class="stat-icon-topics">${icons.checkCircle}</span>
+          <span class="profile-stat-number">${topicsCompletedTotal}</span>
+        </div>
+        <p class="lang-meta">lessons done</p>
+      </div>
+    </div>
+
+    <div class="home-two-col-row">
+      ${resumeCardHtml}
+      <div class="profile-card">
+        <p class="lang-name">This week</p>
+        <p class="lang-meta" style="margin-bottom:1rem;">${daysPractisedThisWeek} of 7 days practised</p>
+        <div class="home-week-row">${weekCalendarHtml}</div>
+        <p class="lang-meta" style="margin-top:1rem;">Miss a day and a freeze covers you — you have ${streakFreezeCount}.</p>
+      </div>
+    </div>
+
+    <div class="languages-section-header">
+      <h2 class="goal-title" style="margin-bottom:0;">My tracks</h2>
+      <div class="filter-pill-row">
+        <button type="button" class="filter-pill ${trackFilter === 'all' ? 'active' : ''}" data-track-filter="all">All</button>
+        <button type="button" class="filter-pill ${
+          trackFilter === 'in-progress' ? 'active' : ''
+        }" data-track-filter="in-progress">In progress</button>
+        <button type="button" class="filter-pill ${
+          trackFilter === 'not-started' ? 'active' : ''
+        }" data-track-filter="not-started">Not started</button>
+      </div>
+    </div>
+    <div class="lang-grid">
+      ${
+        filteredTracks.map(renderHomeTrackTile).join('') ||
+        '<p class="playground-output-placeholder">No tracks match this filter.</p>'
+      }
+    </div>
+
+    <div class="home-two-col-row">
+      <div class="profile-card">
+        <p class="lang-name">Quiz collection</p>
+        <p class="lang-meta" style="margin-bottom:1rem;">Grouped by language, then by difficulty.</p>
+        <p class="lang-meta" style="margin-bottom:1rem;">${quizSummary.totalTopics} quizzes across ${
+          quizSummary.languagesCount
+        } language${quizSummary.languagesCount === 1 ? '' : 's'} &middot; ${
+          quizSummary.masteredCount
+        } mastered</p>
+        <button type="button" class="btn btn-secondary btn-sm" id="home-browse-quizzes">${
+          icons.clipboardList
+        } Browse quizzes</button>
+      </div>
+      <div class="profile-card">
+        <p class="lang-name">Playground</p>
+        <p class="lang-meta" style="margin-bottom:1rem;">Scratch file, no topic attached.</p>
+        <p class="lang-meta" style="margin-bottom:1rem;">Test an idea, paste code from a lecture, or redo an exercise without losing your progress.</p>
+        <button type="button" class="btn btn-secondary btn-sm" id="home-open-editor">${
+          icons.terminal
+        } Open editor</button>
+      </div>
+    </div>
+  `
+
+  app.innerHTML = renderAppShell({ topLabel: 'Home', mainHtml })
+  bindAppShell()
+
+  const continueBtn = document.querySelector('#home-continue-cta')
+  if (continueBtn && lastViewedTopic) {
+    continueBtn.addEventListener('click', () =>
+      openTopic(lastViewedTopic.language, lastViewedTopic.chapterSlug, lastViewedTopic.topicSlug)
+    )
+  }
+  const resumeBtn = document.querySelector('#home-resume-btn')
+  if (resumeBtn) {
+    resumeBtn.addEventListener('click', () =>
+      openTopic(lastViewedTopic.language, lastViewedTopic.chapterSlug, lastViewedTopic.topicSlug)
+    )
+  }
+  const browseTracksBtn = document.querySelector('#home-browse-tracks')
+  if (browseTracksBtn) browseTracksBtn.addEventListener('click', goToLanguagesPage)
+  document.querySelector('#home-browse-quizzes').addEventListener('click', goToQuizCollection)
+  document.querySelector('#home-open-editor').addEventListener('click', goToPlayground)
+  document.querySelectorAll('.home-track-tile').forEach((tile) => {
+    tile.addEventListener('click', () => {
+      const lang = tile.dataset.lang
+      window.history.pushState({}, '', `/course/${encodeURIComponent(lang)}`)
+      goToCourse({ name: 'course', language: lang })
+    })
+  })
+  document.querySelectorAll('[data-track-filter]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      trackFilter = btn.dataset.trackFilter
+      render()
+    })
+  })
+}
+
+async function handleSavePreferences() {
+  try {
+    const { user: updatedUser } = await updateLanguages(selectedLanguages, selectedGoal)
+    setUser(updatedUser)
+    showToast('Preferences saved.', { icon: icons.check })
+  } catch (err) {
+    languagesPageError = err.message
+  }
+  render()
+}
+
+function renderLanguagesPage() {
+  currentCourseLanguage = null
+
+  const original = user.languagesToLearn
+  const pendingAdds = selectedLanguages.filter((l) => !original.includes(l))
+  const pendingRemoves = original.filter((l) => !selectedLanguages.includes(l))
+  const hasChanges = pendingAdds.length > 0 || pendingRemoves.length > 0
+
+  const totalTopics = SUPPORTED_LANGUAGES.filter((l) => selectedLanguages.includes(l.name)).reduce(
+    (sum, l) => sum + l.topics,
+    0
+  )
+  const progressPct = Math.round((selectedLanguages.length / SUPPORTED_LANGUAGES.length) * 100)
+
+  const addedLangs = SUPPORTED_LANGUAGES.filter((l) => selectedLanguages.includes(l.name))
+  const availableLangs = SUPPORTED_LANGUAGES.filter((l) => !selectedLanguages.includes(l.name))
+
+  const renderLanguageTile = (lang, added) => `
+    <button type="button" class="lang-tile language-page-tile ${
+      added ? 'selected' : ''
+    }" data-lang="${lang.name}" data-lang-name="${lang.name.toLowerCase()}">
+      ${
+        added
+          ? `<span class="language-added-pill">${icons.check} Added</span>`
+          : '<span class="lang-radio"></span>'
+      }
+      <span class="lang-glyph" style="background:${lang.color}">${lang.glyph}</span>
+      <div class="lang-name">${lang.name}</div>
+      <div class="lang-meta">${lang.chapters} chapters &middot; ${lang.topics} topics</div>
+    </button>
+  `
+
+  const pendingChips = [
+    ...pendingAdds.map(
+      (l) =>
+        `<span class="chip">+ ${l} <button type="button" class="chip-remove" data-lang="${l}">${icons.x}</button></span>`
+    ),
+    ...pendingRemoves.map(
+      (l) =>
+        `<span class="chip">&minus; ${l} <button type="button" class="chip-remove" data-lang="${l}">${icons.x}</button></span>`
+    ),
+  ].join('')
+
+  const mainHtml = `
+    <div class="languages-page-header">
+      <div>
+        <p class="eyebrow">YOUR LEARNING</p>
+        <h1 class="onboarding-heading" style="margin-bottom:0.5rem;">Languages you're learning</h1>
+        <p class="onboarding-subtext" style="max-width:60ch; margin-bottom:0;">Each language you keep adds its chapters and topics to your sidebar. Drop one and its progress is kept — it just stops showing up.</p>
+      </div>
+      <div class="input-wrap languages-search-wrap">
+        <span class="input-icon">${icons.search}</span>
+        <input type="text" id="language-search" placeholder="Search languages" class="input input-with-icon languages-search-input" />
+      </div>
+    </div>
+
+    ${languagesPageError ? `<p class="error-text">${escapeHtml(languagesPageError)}</p>` : ''}
+
+    <div class="languages-summary-row">
+      <span>${selectedLanguages.length} of ${SUPPORTED_LANGUAGES.length} languages</span>
+      <span>${totalTopics} topics on your sidebar</span>
+    </div>
+    <div class="progress-track" style="margin-bottom: var(--sp-6);">
+      <div class="progress-fill" style="width:${progressPct}%"></div>
+    </div>
+
+    <div class="languages-section-header">
+      <h2 class="goal-title" style="margin-bottom:0;">On your sidebar</h2>
+      <span class="languages-count-badge">${addedLangs.length}</span>
+    </div>
+    <div class="lang-grid" style="margin-bottom: var(--sp-6);">
+      ${
+        addedLangs.map((l) => renderLanguageTile(l, true)).join('') ||
+        '<p class="playground-output-placeholder">No languages yet — add one below.</p>'
+      }
+    </div>
+
+    <div class="languages-section-header">
+      <h2 class="goal-title" style="margin-bottom:0;">Available to add</h2>
+      <span class="languages-count-badge">${availableLangs.length}</span>
+    </div>
+    <div class="lang-grid" style="margin-bottom: var(--sp-6);">
+      ${availableLangs.map((l) => renderLanguageTile(l, false)).join('')}
+    </div>
+
+    <div class="goal-card" style="margin-bottom: 6rem;">
+      <p class="goal-title">Daily goal</p>
+      <p class="goal-subtext">Changes how much you need to do to keep a streak — nothing is locked either way</p>
+      <div class="goal-options">
+        ${renderGoalOption('chill', 'Chill', '1 topic a day')}
+        ${renderGoalOption('steady', 'Steady', '2 topics a day')}
+        ${renderGoalOption('serious', 'Serious', '4 topics a day')}
+      </div>
+    </div>
+
+    <div class="languages-pending-bar">
+      <div class="chip-row">${
+        pendingChips || '<span class="languages-no-changes">No changes yet.</span>'
+      }</div>
+      <div class="languages-pending-actions">
+        <button type="button" class="pill-link" id="languages-reset" ${hasChanges ? '' : 'disabled'}>Reset</button>
+        <button type="button" class="btn btn-primary btn-sm" id="languages-save" ${
+          hasChanges ? '' : 'disabled'
+        }>${icons.check} Save languages</button>
+      </div>
+    </div>
+  `
+
+  app.innerHTML = renderAppShell({ topLabel: 'Home', mainHtml })
+  bindAppShell()
+
+  function toggleLanguage(lang) {
+    selectedLanguages = selectedLanguages.includes(lang)
+      ? selectedLanguages.filter((l) => l !== lang)
+      : [...selectedLanguages, lang]
+    render()
+  }
+
+  document.querySelectorAll('.language-page-tile').forEach((btn) => {
+    btn.addEventListener('click', () => toggleLanguage(btn.dataset.lang))
+  })
+  document.querySelectorAll('.chip-remove').forEach((btn) => {
+    btn.addEventListener('click', () => toggleLanguage(btn.dataset.lang))
+  })
+  document.querySelectorAll('input[name="dailyGoal"]').forEach((radio) => {
+    radio.addEventListener('change', (e) => {
+      selectedGoal = e.target.value
+      render()
+    })
+  })
+  document.querySelector('#languages-reset').addEventListener('click', () => {
+    selectedLanguages = [...user.languagesToLearn]
+    render()
+  })
+  document.querySelector('#languages-save').addEventListener('click', handleSavePreferences)
+  document.querySelector('#language-search').addEventListener('input', (e) => {
+    const q = e.target.value.trim().toLowerCase()
+    document.querySelectorAll('.language-page-tile').forEach((tile) => {
+      tile.style.display = tile.dataset.langName.includes(q) ? '' : 'none'
+    })
+  })
+}
+
+// ---- Quiz collection ----
+
+function quizCollectionDataReady() {
+  return selectedLanguages.every((lang) => chaptersByLanguage[lang] && quizProgressByLanguage[lang])
+}
+
+async function loadQuizCollectionData() {
+  await Promise.all(
+    selectedLanguages.map(async (lang) => {
+      if (!chaptersByLanguage[lang]) {
+        try {
+          const { chapters } = await fetchChapters(lang)
+          chaptersByLanguage[lang] = chapters
+        } catch {
+          chaptersByLanguage[lang] = []
+        }
+      }
+      if (!quizProgressByLanguage[lang]) {
+        try {
+          const { progress } = await fetchQuizProgress(lang)
+          quizProgressByLanguage[lang] = progress
+        } catch {
+          quizProgressByLanguage[lang] = {}
+        }
+      }
+    })
+  )
+  render()
+}
+
+function renderQuizCollectionPage() {
+  currentCourseLanguage = null
+
+  if (!quizCollectionDataReady()) {
+    app.innerHTML = renderAppShell({ topLabel: 'Quiz collection', mainHtml: '<p>Loading…</p>' })
+    bindAppShell()
+    loadQuizCollectionData()
+    return
+  }
+
+  let totalTopics = 0
+  let practicedTopics = 0
+  selectedLanguages.forEach((lang) => {
+    ;(chaptersByLanguage[lang] || []).forEach((chapter) => {
+      totalTopics += chapter.topics.length
+    })
+    practicedTopics += Object.keys(quizProgressByLanguage[lang] || {}).length
+  })
+
+  const languageFilterPills = ['all', ...selectedLanguages]
+    .map((lang) => {
+      const active = quizLanguageFilter === lang
+      return `<button type="button" class="filter-pill ${active ? 'active' : ''}" data-lang-filter="${lang}">${
+        lang === 'all' ? 'All languages' : lang
+      }</button>`
+    })
+    .join('')
+
+  const languagesToShow = quizLanguageFilter === 'all' ? selectedLanguages : [quizLanguageFilter]
+
+  const sectionsHtml = languagesToShow
+    .map((lang) => {
+      const langMeta = SUPPORTED_LANGUAGES.find((l) => l.name === lang)
+      const chapters = chaptersByLanguage[lang] || []
+      const progress = quizProgressByLanguage[lang] || {}
+
+      const cardsHtml = chapters
+        .flatMap((chapter) => chapter.topics.map((topic) => ({ chapter, topic })))
+        .map(({ chapter, topic }) => {
+          const status = progress[`${chapter.slug}/${topic.slug}`]
+          const statusClass = !status ? '' : status.mastered ? 'mastered' : 'in-progress'
+          const statusLabel = !status ? 'Not started' : status.mastered ? 'Mastered' : `In progress · ${status.currentBand}`
+          const buttonLabel = !status ? 'Start practicing' : 'Continue practicing'
+          return `
+            <div class="quiz-topic-card" data-topic-title="${topic.title.toLowerCase()}">
+              <span class="quiz-topic-status-pill ${statusClass}">${statusLabel}</span>
+              <p class="quiz-topic-title">${topic.title}</p>
+              <p class="quiz-topic-chapter">${chapter.title}</p>
+              <button type="button" class="btn btn-primary btn-sm quiz-topic-start" data-lang="${lang}" data-chapter="${chapter.slug}" data-topic="${topic.slug}">${buttonLabel} ${icons.arrowRight}</button>
+            </div>
+          `
+        })
+        .join('')
+
+      if (!cardsHtml) return ''
+
+      return `
+        <div class="quiz-language-section">
+          <div class="quiz-language-header">
+            <span class="lang-glyph" style="background:${langMeta.color}">${langMeta.glyph}</span>
+            <span class="quiz-language-name">${lang}</span>
+          </div>
+          <div class="quiz-topic-grid">${cardsHtml}</div>
+        </div>
+      `
+    })
+    .join('')
+
+  const mainHtml = `
+    <div class="languages-page-header">
+      <div>
+        <p class="eyebrow">QUIZ COLLECTION</p>
+        <h1 class="onboarding-heading" style="margin-bottom:0.5rem;">Test what stuck.</h1>
+        <p class="onboarding-subtext" style="max-width:60ch; margin-bottom:0;">Practice adapts to you — questions get harder as you get things right, and easier if you don't. Points bank once every 10 questions.</p>
+      </div>
+      <div class="input-wrap languages-search-wrap">
+        <span class="input-icon">${icons.search}</span>
+        <input type="text" id="quiz-search" placeholder="Search topics" class="input input-with-icon languages-search-input" />
+      </div>
+    </div>
+
+    <div class="quiz-summary-row">
+      <div class="quiz-summary-stat">
+        <span class="quiz-summary-value">${practicedTopics} / ${totalTopics}</span>
+        <span class="quiz-summary-label">topics practiced</span>
+      </div>
+      <div class="quiz-summary-stat">
+        <span class="quiz-summary-value">${user.points.toLocaleString()}</span>
+        <span class="quiz-summary-label">points banked</span>
+      </div>
+    </div>
+
+    <div class="filter-pill-row">${languageFilterPills}</div>
+
+    ${sectionsHtml || '<p class="playground-output-placeholder">No topics yet for your selected languages.</p>'}
+  `
+
+  app.innerHTML = renderAppShell({ topLabel: 'Quiz collection', mainHtml })
+  bindAppShell()
+
+  document.querySelectorAll('[data-lang-filter]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      quizLanguageFilter = btn.dataset.langFilter
+      render()
+    })
+  })
+  document.querySelectorAll('.quiz-topic-start').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      goToQuizSession(btn.dataset.lang, btn.dataset.chapter, btn.dataset.topic)
+    })
+  })
+  const searchInput = document.querySelector('#quiz-search')
+  searchInput.value = quizSearch
+  searchInput.addEventListener('input', (e) => {
+    quizSearch = e.target.value
+    const q = quizSearch.trim().toLowerCase()
+    document.querySelectorAll('.quiz-topic-card').forEach((card) => {
+      card.style.display = card.dataset.topicTitle.includes(q) ? '' : 'none'
+    })
+  })
+}
+
+// ---- Quiz session (the adaptive quiz-taking page) ----
+
+async function startQuizSession(route) {
+  quizRoute = route
+  quizQuestion = null
+  quizSessionInfo = null
+  quizSelectedChoice = null
+  quizAnswerResult = null
+  quizHint = null
+  quizRoundComplete = null
+  quizError = ''
+  quizLoading = true
+  render()
+
+  try {
+    const { question, session } = await fetchNextQuestion(route.language, route.chapterSlug, route.topicSlug)
+    quizQuestion = question
+    quizSessionInfo = session
+  } catch (err) {
+    quizError = err.message
+  }
+  quizLoading = false
+  render()
+}
+
+function startNewRound() {
+  quizRoundComplete = null
+  startQuizSession(quizRoute)
+}
+
+async function checkQuizAnswer() {
+  if (quizSelectedChoice === null) return
+  try {
+    const result = await submitQuizAnswer(
+      quizRoute.language,
+      quizRoute.chapterSlug,
+      quizRoute.topicSlug,
+      quizQuestion.id,
+      quizSelectedChoice
+    )
+    quizAnswerResult = result
+    quizSessionInfo = result.session
+
+    const progressKey = `${quizRoute.chapterSlug}/${quizRoute.topicSlug}`
+    if (quizProgressByLanguage[quizRoute.language]) {
+      quizProgressByLanguage[quizRoute.language][progressKey] = {
+        currentBand: result.session.currentBand,
+        mastered: result.session.currentBand === 'hard',
+      }
+    }
+
+    if (result.roundComplete) {
+      quizRoundComplete = { bankedPoints: result.bankedPoints, totalPoints: result.totalPoints }
+      if (result.totalPoints !== undefined) user.points = result.totalPoints
+    }
+  } catch (err) {
+    quizError = err.message
+  }
+  render()
+}
+
+async function requestQuizHintForCurrentQuestion() {
+  try {
+    const { hint, session } = await fetchQuizHint(
+      quizRoute.language,
+      quizRoute.chapterSlug,
+      quizRoute.topicSlug,
+      quizQuestion.id
+    )
+    quizHint = hint
+    quizSessionInfo = session
+  } catch (err) {
+    quizError = err.message
+  }
+  render()
+}
+
+function advanceToNextQuizQuestion() {
+  startQuizSession(quizRoute)
+}
+
+function renderQuizQuestion() {
+  const checked = !!quizAnswerResult
+  const [firstLine, ...codeLines] = quizQuestion.questionText.split('\n')
+  const codeBlock = codeLines.length > 0 ? `<pre class="quiz-code-block">${escapeHtml(codeLines.join('\n'))}</pre>` : ''
+
+  const choicesHtml = quizQuestion.choices
+    .map((choice, i) => {
+      let cls = 'quiz-choice'
+      if (checked) {
+        if (i === quizAnswerResult.correctChoice) cls += ' correct'
+        else if (i === quizSelectedChoice) cls += ' incorrect'
+      } else if (i === quizSelectedChoice) {
+        cls += ' selected'
+      }
+      return `
+        <button type="button" class="${cls}" data-choice="${i}" ${checked ? 'disabled' : ''}>
+          <span class="quiz-choice-letter">${String.fromCharCode(65 + i)}</span>
+          <span class="quiz-choice-text">${escapeHtml(choice)}</span>
+        </button>
+      `
+    })
+    .join('')
+
+  const chapter = chaptersByLanguage[quizRoute.language]?.find((c) => c.slug === quizRoute.chapterSlug)
+
+  return `
+    <p class="eyebrow">${quizRoute.language.toUpperCase()} &middot; ${(chapter?.title || '').toUpperCase()}</p>
+    <h2 class="quiz-question-text">${escapeHtml(firstLine)}</h2>
+    ${codeBlock}
+    <div class="quiz-choices">${choicesHtml}</div>
+    ${
+      checked
+        ? `<div class="quiz-explanation ${quizAnswerResult.correct ? 'correct' : 'incorrect'}">
+             <p class="quiz-explanation-label">${quizAnswerResult.correct ? 'Correct' : 'Not quite'}</p>
+             <p>${escapeHtml(quizAnswerResult.explanation)}</p>
+           </div>`
+        : ''
+    }
+    ${quizHint ? `<div class="quiz-hint-box">${icons.lightbulb}<span>${escapeHtml(quizHint)}</span></div>` : ''}
+    <div class="quiz-footer">
+      ${
+        !checked
+          ? `<button type="button" class="pill-link" id="quiz-hint-btn" ${quizHint ? 'disabled' : ''}>${icons.lightbulb} Hint</button>`
+          : '<span></span>'
+      }
+      ${
+        checked
+          ? `<button type="button" class="btn btn-primary" id="quiz-next-btn">Next question ${icons.arrowRight}</button>`
+          : `<button type="button" class="btn btn-primary" id="quiz-check-btn" ${
+              quizSelectedChoice === null ? 'disabled' : ''
+            }>Check answer</button>`
+      }
+    </div>
+  `
+}
+
+function bindQuizQuestion() {
+  document.querySelectorAll('.quiz-choice').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      quizSelectedChoice = Number(btn.dataset.choice)
+      render()
+    })
+  })
+  const hintBtn = document.querySelector('#quiz-hint-btn')
+  if (hintBtn) hintBtn.addEventListener('click', requestQuizHintForCurrentQuestion)
+  const checkBtn = document.querySelector('#quiz-check-btn')
+  if (checkBtn) checkBtn.addEventListener('click', checkQuizAnswer)
+  const nextBtn = document.querySelector('#quiz-next-btn')
+  if (nextBtn) nextBtn.addEventListener('click', advanceToNextQuizQuestion)
+}
+
+function renderQuizRoundComplete() {
+  return `
+    <div class="quiz-round-complete">
+      <p class="quiz-round-complete-label">Round complete</p>
+      <p class="quiz-round-complete-points">+${quizRoundComplete.bankedPoints} pts</p>
+      <p class="quiz-round-complete-total">${quizRoundComplete.totalPoints.toLocaleString()} points total</p>
+      <div class="quiz-round-complete-actions">
+        <button type="button" class="btn btn-secondary btn-sm" id="quiz-back-to-collection">Back to Quiz collection</button>
+        <button type="button" class="btn btn-primary" id="quiz-practice-again">Practice again ${icons.arrowRight}</button>
+      </div>
+    </div>
+  `
+}
+
+function bindQuizRoundComplete() {
+  document.querySelector('#quiz-back-to-collection').addEventListener('click', goToQuizCollection)
+  document.querySelector('#quiz-practice-again').addEventListener('click', startNewRound)
+}
+
+function renderQuizSessionPage(route) {
+  const routeMatches =
+    quizRoute &&
+    quizRoute.language === route.language &&
+    quizRoute.chapterSlug === route.chapterSlug &&
+    quizRoute.topicSlug === route.topicSlug
+
+  if (!routeMatches) {
+    app.innerHTML = renderAppShell({ topLabel: 'Quiz collection', mainHtml: '<p>Loading…</p>' })
+    bindAppShell()
+    if (!quizLoading) startQuizSession(route)
+    return
+  }
+
+  if (quizError) {
+    const mainHtml = `<p class="error-text">${escapeHtml(quizError)}</p><button type="button" class="btn btn-secondary btn-sm" id="quiz-back" style="width:auto;">Back to Quiz collection</button>`
+    app.innerHTML = renderAppShell({ topLabel: 'Quiz collection', mainHtml })
+    bindAppShell()
+    document.querySelector('#quiz-back').addEventListener('click', goToQuizCollection)
+    return
+  }
+
+  const langMeta = SUPPORTED_LANGUAGES.find((l) => l.name === route.language)
+  const chapter = chaptersByLanguage[route.language]?.find((c) => c.slug === route.chapterSlug)
+  const topic = chapter?.topics.find((t) => t.slug === route.topicSlug)
+
+  const bodyHtml = quizRoundComplete
+    ? renderQuizRoundComplete()
+    : quizLoading || !quizQuestion
+      ? '<p>Loading…</p>'
+      : renderQuizQuestion()
+
+  const cap = quizSessionInfo?.cap || 10
+  const answeredSoFar = quizSessionInfo?.questionsAnswered || 0
+  const segments = Array.from({ length: cap })
+    .map((_, i) => `<span class="lesson-segment ${i < answeredSoFar ? 'filled' : ''}"></span>`)
+    .join('')
+
+  const mainHtml = `
+    <div class="lesson-header">
+      <button type="button" class="lesson-close-btn" id="quiz-close" title="Back to Quiz collection">${icons.x}</button>
+      <span class="lang-glyph lesson-header-glyph" style="background:${langMeta.color}">${langMeta.glyph}</span>
+      <div class="lesson-header-info">
+        <div class="lesson-header-top">
+          <span class="lesson-chapter-name">${topic?.title || route.topicSlug}</span>
+          <span class="lesson-topic-count">Question ${Math.min(answeredSoFar + 1, cap)} of ${cap}</span>
+        </div>
+        <div class="lesson-segments">${segments}</div>
+      </div>
+      ${
+        quizSessionInfo && !quizRoundComplete
+          ? `<span class="quiz-band-pill ${quizSessionInfo.currentBand}">${quizSessionInfo.currentBand}</span>
+             <span class="quiz-points-pill">${icons.gem} ${quizSessionInfo.rawPoints} pts</span>`
+          : ''
+      }
+    </div>
+    <div class="quiz-session-body">${bodyHtml}</div>
+  `
+
+  const breadcrumb = `Quiz collection <span class="breadcrumb-sep">&rsaquo;</span> ${route.language} <span class="breadcrumb-sep">&rsaquo;</span> ${
+    topic?.title || route.topicSlug
+  }`
+
+  app.innerHTML = renderAppShell({ topLabel: breadcrumb, mainHtml })
+  bindAppShell()
+
+  document.querySelector('#quiz-close').addEventListener('click', goToQuizCollection)
+  if (quizRoundComplete) {
+    bindQuizRoundComplete()
+  } else if (quizQuestion) {
+    bindQuizQuestion()
+  }
+}
+
+async function handleLogout() {
+  await logout()
+  closeMobileMenu()
+  user = null
+  authMode = 'login'
+  chaptersByLanguage = {}
+  expandedTracks = new Set()
+  expandedChapters = new Set()
+  currentCourseLanguage = null
+  courseTopic = null
+  courseTopicKey = null
+  playgroundLanguage = null
+  playgroundEditor = null
+  playgroundCode = {}
+  playgroundResult = null
+  playgroundError = ''
+  shopItems = null
+  profilePageData = null
+  profileInventoryTab = 'cosmetics'
+  deleteAccountDialogOpen = false
+  homePageData = null
+  homePageError = ''
+  trackFilter = 'all'
+  toasts = []
+  onboardingStep = 1
+  onboardingAvatarChoice = 'bottts'
+  onboardingAvatarError = ''
+  onboardingAvatarSaving = false
+  window.history.pushState({}, '', '/')
+  render()
+}
+
+// ---- Course / lesson page ----
+// The sidebar built by renderAppShell() IS the course navigation — there's
+// no separate course-only layout. Opening a topic just expands its track
+// in that same persistent sidebar and swaps the main content area.
+
+function flattenTopics(chapters) {
+  const flat = []
+  chapters.forEach((chapter) => {
+    chapter.topics.forEach((topic) => {
+      flat.push({
+        chapterSlug: chapter.slug,
+        chapterTitle: chapter.title,
+        topicSlug: topic.slug,
+        topicTitle: topic.title,
+      })
+    })
+  })
+  return flat
+}
+
+function openTopic(language, chapterSlug, topicSlug) {
+  closeMobileMenu()
+  window.history.pushState({}, '', `/course/${encodeURIComponent(language)}/${chapterSlug}/${topicSlug}`)
+  goToCourse({ name: 'course', language, chapterSlug, topicSlug })
+}
+
+async function goToCourse(route) {
+  if (courseLoading) return
+  courseLoading = true
+  courseError = ''
+  currentCourseLanguage = route.language
+  expandedTracks.add(route.language)
+  render()
+
+  try {
+    if (!chaptersByLanguage[route.language]) {
+      const { chapters } = await fetchChapters(route.language)
+      chaptersByLanguage[route.language] = chapters
+    }
+    const chapters = chaptersByLanguage[route.language]
+
+    let { chapterSlug, topicSlug } = route
+    if (!chapterSlug || !topicSlug) {
+      const firstChapter = chapters[0]
+      chapterSlug = firstChapter?.slug
+      topicSlug = firstChapter?.topics[0]?.slug
+      if (chapterSlug && topicSlug) {
+        window.history.replaceState(
+          {},
+          '',
+          `/course/${encodeURIComponent(route.language)}/${chapterSlug}/${topicSlug}`
+        )
+      }
+    }
+
+    if (!chapterSlug || !topicSlug) {
+      courseTopic = null
+      courseError = `No chapters yet for ${route.language}.`
+      return
+    }
+
+    expandedChapters.add(`${route.language}/${chapterSlug}`)
+
+    const key = `${route.language}/${chapterSlug}/${topicSlug}`
+    if (courseTopicKey !== key) {
+      const data = await fetchTopic(route.language, chapterSlug, topicSlug)
+      courseTopic = { ...data.topic, chapterTitle: data.chapterTitle, chapterSlug }
+      courseTopicKey = key
+      // First-ever view of this topic banks a small completion bonus
+      // (see courseController.getTopic) — sync it the same way quiz-round
+      // banking does: assign totalPoints directly, no refetch.
+      if (data.pointsAwarded > 0 && data.totalPoints !== undefined) {
+        user.points = data.totalPoints
+        showToast(`+${data.pointsAwarded} points earned!`, { icon: icons.gem })
+      }
+    }
+  } catch (err) {
+    courseError = err.message
+  } finally {
+    courseLoading = false
+    render()
+  }
+}
+
+function renderCoursePage(route) {
+  const language = route.language
+  const chapters = chaptersByLanguage[language]
+  const dataReady =
+    chapters &&
+    courseTopic &&
+    (!route.chapterSlug || route.chapterSlug === courseTopic.chapterSlug) &&
+    (!route.topicSlug || route.topicSlug === courseTopic.slug)
+
+  if (courseError) {
+    app.innerHTML = renderAppShell({ topLabel: language, mainHtml: `<p class="error-text">${courseError}</p>` })
+    bindAppShell()
+    return
+  }
+
+  if (!dataReady) {
+    app.innerHTML = renderAppShell({ topLabel: language, mainHtml: '<p>Loading…</p>' })
+    bindAppShell()
+    if (!courseLoading) goToCourse(route)
+    return
+  }
+
+  const flat = flattenTopics(chapters)
+  const currentIndex = flat.findIndex(
+    (t) => t.chapterSlug === courseTopic.chapterSlug && t.topicSlug === courseTopic.slug
+  )
+  const prev = currentIndex > 0 ? flat[currentIndex - 1] : null
+  const next = currentIndex >= 0 && currentIndex < flat.length - 1 ? flat[currentIndex + 1] : null
+
+  const chapter = chapters.find((c) => c.slug === courseTopic.chapterSlug)
+  const topicIndexInChapter = chapter.topics.findIndex((t) => t.slug === courseTopic.slug)
+  const langMeta = SUPPORTED_LANGUAGES.find((l) => l.name === language)
+
+  const segments = chapter.topics
+    .map((_, i) => `<span class="lesson-segment ${i <= topicIndexInChapter ? 'filled' : ''}"></span>`)
+    .join('')
+
+  const tocItems = chapter.topics
+    .map((t) => {
+      const active = t.slug === courseTopic.slug
+      return `
+        <button type="button" class="lesson-toc-item ${
+          active ? 'active' : ''
+        }" data-lang="${language}" data-chapter="${chapter.slug}" data-topic="${t.slug}">
+          <span class="lesson-toc-icon">${active ? icons.bookOpen : icons.circle}</span>
+          <span class="lesson-toc-title">${t.title}</span>
+          <span class="lesson-toc-time">${t.readingMinutes}m</span>
+        </button>
+      `
+    })
+    .join('')
+
+  const mainHtml = `
+    <div class="lesson-header">
+      <button type="button" class="lesson-close-btn" id="lesson-close" title="Leave this chapter">${icons.x}</button>
+      <span class="lang-glyph lesson-header-glyph" style="background:${langMeta.color}">${langMeta.glyph}</span>
+      <div class="lesson-header-info">
+        <div class="lesson-header-top">
+          <span class="lesson-chapter-name">${chapter.title}</span>
+          <span class="lesson-topic-count">Topic ${topicIndexInChapter + 1} of ${chapter.topics.length}</span>
+        </div>
+        <div class="lesson-segments">${segments}</div>
+      </div>
+      <span class="lesson-status-pill">${icons.bookOpen} Reading</span>
+      <span class="lesson-time-pill">${icons.clock} ${courseTopic.readingMinutes} min</span>
+    </div>
+    <div class="lesson-layout">
+      <div class="lesson-main">
+        <p class="eyebrow">${courseTopic.chapterTitle}</p>
+        <h1 class="onboarding-heading" style="margin-bottom:1.25rem;">${courseTopic.title}</h1>
+        <div class="prose">${marked.parse(courseTopic.content)}</div>
+        <div class="course-nav-row">
+          ${
+            prev
+              ? `<button type="button" class="btn btn-secondary btn-sm course-prev" data-lang="${language}" data-chapter="${prev.chapterSlug}" data-topic="${prev.topicSlug}">&larr; ${prev.topicTitle}</button>`
+              : '<span></span>'
+          }
+          ${
+            next
+              ? `<button type="button" class="btn btn-primary btn-sm course-next" data-lang="${language}" data-chapter="${next.chapterSlug}" data-topic="${next.topicSlug}">${next.topicTitle} &rarr;</button>`
+              : '<span></span>'
+          }
+        </div>
+      </div>
+      <aside class="lesson-toc">
+        <p class="lesson-toc-label">In this chapter</p>
+        <div class="lesson-toc-list">${tocItems}</div>
+        <div class="lesson-toc-note">Quizzes for this chapter will be on the Quiz collection page.</div>
+      </aside>
+    </div>
+  `
+
+  const breadcrumb = `${language} <span class="breadcrumb-sep">&rsaquo;</span> ${chapter.title} <span class="breadcrumb-sep">&rsaquo;</span> ${courseTopic.title}`
+
+  app.innerHTML =
+    renderAppShell({ topLabel: breadcrumb, mainHtml }) +
+    (leaveDialogOpen
+      ? `
+    <div class="dialog-overlay" id="leave-dialog-overlay">
+      <div class="dialog-card">
+        <div class="dialog-header">
+          <h2 class="dialog-title">Leave this chapter?</h2>
+          <button type="button" class="dialog-close-x" id="leave-dialog-x">${icons.x}</button>
+        </div>
+        <p class="dialog-body">You can find this topic again any time from the sidebar.</p>
+        <div class="dialog-actions">
+          <button type="button" class="btn btn-secondary btn-sm" id="leave-dialog-keep">Keep reading</button>
+          <button type="button" class="btn btn-sm dialog-leave-btn" id="leave-dialog-leave">Leave</button>
+        </div>
+      </div>
+    </div>
+  `
+      : '')
+
+  bindAppShell()
+  document.querySelector('#lesson-close').addEventListener('click', openLeaveDialog)
+  document.querySelectorAll('.lesson-toc-item').forEach((btn) => {
+    btn.addEventListener('click', () => openTopic(btn.dataset.lang, btn.dataset.chapter, btn.dataset.topic))
+  })
+  const prevBtn = document.querySelector('.course-prev')
+  if (prevBtn) {
+    prevBtn.addEventListener('click', () =>
+      openTopic(prevBtn.dataset.lang, prevBtn.dataset.chapter, prevBtn.dataset.topic)
+    )
+  }
+  const nextBtn = document.querySelector('.course-next')
+  if (nextBtn) {
+    nextBtn.addEventListener('click', () =>
+      openTopic(nextBtn.dataset.lang, nextBtn.dataset.chapter, nextBtn.dataset.topic)
+    )
+  }
+  document.querySelectorAll('.snippet-copy-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const code = btn.closest('.snippet-card').querySelector('.snippet-body').innerText
+      navigator.clipboard.writeText(code)
+      const original = btn.textContent
+      btn.textContent = 'Copied!'
+      setTimeout(() => {
+        btn.textContent = original
+      }, 1500)
+    })
+  })
+
+  if (leaveDialogOpen) {
+    document.querySelector('#leave-dialog-x').addEventListener('click', closeLeaveDialog)
+    document.querySelector('#leave-dialog-keep').addEventListener('click', closeLeaveDialog)
+    document.querySelector('#leave-dialog-leave').addEventListener('click', goToDashboard)
+    document.querySelector('#leave-dialog-overlay').addEventListener('click', (e) => {
+      if (e.target.id === 'leave-dialog-overlay') closeLeaveDialog()
+    })
+  }
+}
+
+// ---- Cosmetics (browse + equip everything: avatars, background/border/theme) ----
+
+function shopDataReady() {
+  return shopItems !== null
+}
+
+async function loadShopData() {
+  shopLoading = true
+  try {
+    const data = await fetchShopItems()
+    shopItems = data.items
+    shopCatalogSize = data.catalogSize
+  } catch (err) {
+    showErrorToast(err.message)
+    shopItems = []
+  }
+  shopLoading = false
+  render()
+}
+
+const COSMETICS_TABS = [
+  { tab: 'everything', label: 'Everything' },
+  { tab: 'avatar', label: 'Avatars' },
+  { tab: 'background', label: 'Backgrounds' },
+  { tab: 'border', label: 'Borders' },
+  { tab: 'theme', label: 'Editor themes' },
+]
+
+function renderCosmeticTile(item) {
+  const isAvatar = item.type === 'avatar'
+  const swatchHtml = isAvatar
+    ? `<img class="cosmetic-swatch cosmetic-swatch-avatar" alt="" src="https://api.dicebear.com/9.x/${
+        item.dicebearStyle
+      }/svg?seed=${encodeURIComponent(item.dicebearSeed)}" />`
+    : item.type === 'theme'
+      ? `<span class="cosmetic-swatch ${item.value}"></span>`
+      : `<span class="cosmetic-swatch" style="background:${item.value}"></span>`
+  const badge = item.equipped
+    ? `<span class="language-added-pill">${icons.check} Equipped</span>`
+    : item.owned
+      ? '<span class="lang-radio"></span>'
+      : `<span class="shop-lock-pill">${icons.lock}</span>`
+  const metaText = item.equipped
+    ? 'Equipped'
+    : item.owned
+      ? 'Owned — tap to equip'
+      : `<span class="shop-cost-pill">${item.pointsCost.toLocaleString()} pts</span>`
+
+  return `
+    <button type="button" class="lang-tile shop-tile ${item.equipped ? 'selected' : ''} ${
+      !item.owned ? 'locked' : ''
+    }" data-cosmetic-id="${item.id}" data-type="${item.type}" data-owned="${item.owned}" data-equipped="${
+      item.equipped
+    }" data-name="${item.name.toLowerCase()}">
+      ${badge}
+      ${swatchHtml}
+      <div class="lang-name">${item.name}</div>
+      <div class="lang-meta">${metaText}</div>
+    </button>
+  `
+}
+
+function renderCosmeticsPage() {
+  currentCourseLanguage = null
+
+  if (!shopDataReady()) {
+    app.innerHTML = renderAppShell({ topLabel: 'Cosmetics shop', mainHtml: '<p>Loading…</p>' })
+    bindAppShell()
+    if (!shopLoading) loadShopData()
+    return
+  }
+
+  const ownedAvatarCount = shopItems.filter((i) => i.type === 'avatar').length
+  const totalOwned = shopItems.filter((i) => i.owned).length
+  const totalAvailable = shopCatalogSize + ownedAvatarCount
+  const equippedAvatar = shopItems.find((i) => i.type === 'avatar' && i.equipped)
+
+  const visibleItems =
+    cosmeticsTab === 'everything' ? shopItems : shopItems.filter((i) => i.type === cosmeticsTab)
+
+  const tabsHtml = COSMETICS_TABS.map(
+    ({ tab, label }) =>
+      `<button type="button" class="filter-pill ${cosmeticsTab === tab ? 'active' : ''}" data-cosmetics-tab="${tab}">${label}</button>`
+  ).join('')
+
+  const randomizeCta =
+    cosmeticsTab === 'everything' || cosmeticsTab === 'avatar'
+      ? `<button type="button" class="btn btn-secondary btn-sm" id="cosmetics-randomize-avatar" style="margin-bottom:1rem;">${icons.refresh} Randomise new avatar (250 pts)</button>`
+      : ''
+
+  const mainHtml = `
+    <div class="languages-page-header">
+      <div>
+        <p class="eyebrow">COSMETICS SHOP</p>
+        <h1 class="onboarding-heading" style="margin-bottom:0.5rem;">Spend what you earned.</h1>
+        <p class="onboarding-subtext" style="max-width:60ch; margin-bottom:0;">Points come from finishing quizzes and reading lessons. Nothing here affects your learning — it's all how your profile looks.</p>
+      </div>
+      <div class="input-wrap languages-search-wrap">
+        <span class="input-icon">${icons.search}</span>
+        <input type="text" id="cosmetics-search" placeholder="Search cosmetics" class="input input-with-icon languages-search-input" />
+      </div>
+    </div>
+
+    <div class="cosmetics-stats-row">
+      <div class="profile-card cosmetics-stat-card">
+        <span class="cosmetic-swatch badge-swatch">${icons.gem}</span>
+        <div>
+          <p class="lang-name" style="margin-bottom:0;">${user.points.toLocaleString()}</p>
+          <p class="lang-meta">points to spend</p>
+        </div>
+      </div>
+      <div class="profile-card cosmetics-stat-card">
+        <span class="cosmetic-swatch badge-swatch">${icons.check}</span>
+        <div>
+          <p class="lang-name" style="margin-bottom:0;">${totalOwned} / ${totalAvailable}</p>
+          <p class="lang-meta">cosmetics owned</p>
+        </div>
+      </div>
+      <div class="profile-card cosmetics-stat-card">
+        ${
+          equippedAvatar
+            ? `<img class="cosmetic-swatch cosmetic-swatch-avatar" alt="" src="https://api.dicebear.com/9.x/${
+                equippedAvatar.dicebearStyle
+              }/svg?seed=${encodeURIComponent(equippedAvatar.dicebearSeed)}" />`
+            : `<span class="cosmetic-swatch badge-swatch">${icons.person}</span>`
+        }
+        <div>
+          <p class="lang-name" style="margin-bottom:0;">${equippedAvatar ? equippedAvatar.name : 'No avatar yet'}</p>
+          <p class="lang-meta">currently wearing</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="filter-pill-row" style="margin-bottom:1rem;">${tabsHtml}</div>
+    ${randomizeCta}
+    <div class="lang-grid" id="cosmetics-grid" style="margin-bottom: var(--sp-6);">
+      ${
+        visibleItems.map(renderCosmeticTile).join('') ||
+        '<p class="playground-output-placeholder">Nothing here yet.</p>'
+      }
+    </div>
+  `
+
+  app.innerHTML = renderAppShell({ topLabel: 'Cosmetics shop', mainHtml })
+  bindAppShell()
+
+  document.querySelectorAll('.shop-tile').forEach((tile) => {
+    tile.addEventListener('click', () => {
+      const { cosmeticId, type, owned, equipped } = tile.dataset
+      if (type === 'avatar') {
+        if (equipped !== 'true') handleAvatarEquip(cosmeticId)
+      } else if (owned === 'false') {
+        handlePurchase(cosmeticId)
+      } else if (equipped === 'true') {
+        handleEquip(type, null)
+      } else {
+        handleEquip(type, cosmeticId)
+      }
+    })
+  })
+  document.querySelectorAll('[data-cosmetics-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      cosmeticsTab = btn.dataset.cosmeticsTab
+      render()
+    })
+  })
+  const randomizeBtn = document.querySelector('#cosmetics-randomize-avatar')
+  if (randomizeBtn) randomizeBtn.addEventListener('click', handleAvatarRandomize)
+  const searchInput = document.querySelector('#cosmetics-search')
+  searchInput.value = cosmeticsSearch
+  searchInput.addEventListener('input', (e) => {
+    cosmeticsSearch = e.target.value
+    const q = cosmeticsSearch.trim().toLowerCase()
+    document.querySelectorAll('#cosmetics-grid .shop-tile').forEach((tile) => {
+      tile.style.display = tile.dataset.name.includes(q) ? '' : 'none'
+    })
+  })
+}
+
+async function handlePurchase(cosmeticId) {
+  const itemName = shopItems.find((i) => String(i.id) === String(cosmeticId))?.name
+  try {
+    const result = await purchaseCosmetic(cosmeticId)
+    user.points = result.totalPoints
+    shopItems = null // refetch so owned/equipped state reflects the purchase
+    profilePageData = null // Profile's inventory may also be showing this item
+    showToast(itemName ? `${itemName} purchased!` : 'Purchased!', { icon: icons.check })
+  } catch (err) {
+    showErrorToast(err.message)
+  }
+  render()
+}
+
+async function handleEquip(type, cosmeticId) {
+  try {
+    const result = await equipCosmetic(type, cosmeticId)
+    user.equippedCosmetics = result.equippedCosmetics
+    shopItems = null // refetch so equipped state reflects the change
+    profilePageData = null
+    showToast(cosmeticId ? 'Equipped.' : 'Unequipped.', { icon: icons.check })
+  } catch (err) {
+    showErrorToast(err.message)
+  }
+  render()
+}
+
+// ---- Profile (avatar management, streak insurance, inventory, account) ----
+
+function profileDataReady() {
+  return profilePageData !== null
+}
+
+async function loadProfileData() {
+  profilePageLoading = true
+  try {
+    profilePageData = await fetchProfile()
+  } catch (err) {
+    showErrorToast(err.message)
+    profilePageData = { cosmetics: [], badges: [], streakFreezeCount: 0, currentStreak: 0, points: 0, account: {} }
+  }
+  profilePageLoading = false
+  render()
+}
+
+function renderInventoryCosmeticTile(item) {
+  const swatchHtml =
+    item.type === 'avatar'
+      ? `<img class="cosmetic-swatch cosmetic-swatch-avatar" alt="" src="https://api.dicebear.com/9.x/${
+          item.dicebearStyle
+        }/svg?seed=${encodeURIComponent(item.dicebearSeed)}" />`
+      : item.type === 'theme'
+        ? `<span class="cosmetic-swatch ${item.value}"></span>`
+        : `<span class="cosmetic-swatch" style="background:${item.value}"></span>`
+  const badge = item.equipped
+    ? `<span class="language-added-pill">${icons.check} Equipped</span>`
+    : '<span class="lang-radio"></span>'
+
+  return `
+    <button type="button" class="lang-tile shop-tile inventory-tile ${item.equipped ? 'selected' : ''}"
+      data-cosmetic-id="${item.id}" data-type="${item.type}" data-equipped="${item.equipped}">
+      ${badge}
+      ${swatchHtml}
+      <div class="lang-name">${item.name}</div>
+      <div class="lang-meta">${item.equipped ? 'Equipped' : 'Owned — tap to equip'}</div>
+    </button>
+  `
+}
+
+function renderBadgeTile(badge) {
+  return `
+    <div class="lang-tile shop-tile badge-tile ${badge.earned ? '' : 'locked'}">
+      ${
+        badge.earned
+          ? `<span class="language-added-pill">${icons.check} Earned</span>`
+          : `<span class="shop-lock-pill">${icons.lock}</span>`
+      }
+      <span class="cosmetic-swatch badge-swatch">${icons[badge.icon] || icons.gem}</span>
+      <div class="lang-name">${badge.name}</div>
+      <div class="lang-meta">${badge.earned ? new Date(badge.earnedAt).toLocaleDateString() : badge.description}</div>
+    </div>
+  `
+}
+
+const profileBreadcrumb = `Account <span class="breadcrumb-sep">&rsaquo;</span> Profile`
+
+function renderProfilePage() {
+  currentCourseLanguage = null
+
+  if (!profileDataReady()) {
+    app.innerHTML = renderAppShell({ topLabel: profileBreadcrumb, mainHtml: '<p>Loading…</p>' })
+    bindAppShell()
+    if (!profilePageLoading) loadProfileData()
+    return
+  }
+
+  const { cosmetics, badges, streakFreezeCount, currentStreak, points, topicsCompleted, account } = profilePageData
+  const handle = `@${(account.email || '').split('@')[0]}`
+  const equippedAvatarCosmetic = cosmetics.find((c) => c.type === 'avatar' && c.equipped)
+  // Already sorted newest-first by the API — just take the most recent 5.
+  const recentAvatars = cosmetics.filter((c) => c.type === 'avatar').slice(0, 5)
+  const joinedLabel = user.createdAt
+    ? `joined ${new Date(user.createdAt).toLocaleDateString(undefined, { month: 'long' })}`
+    : ''
+
+  let inventoryHtml
+  if (profileInventoryTab === 'cosmetics') {
+    inventoryHtml = cosmetics.length
+      ? cosmetics.map(renderInventoryCosmeticTile).join('')
+      : '<p class="playground-output-placeholder">Nothing owned yet — visit Cosmetics to buy something, or randomize an avatar above.</p>'
+  } else if (profileInventoryTab === 'powerups') {
+    inventoryHtml = `
+      <div class="lang-tile shop-tile powerup-tile" style="cursor:default; text-align:center;">
+        <div class="powerup-icon-badge" style="margin-left:auto; margin-right:auto;">
+          ${icons.snowflake}
+          <span class="powerup-count-badge">${streakFreezeCount}</span>
+        </div>
+        <p class="lang-name" style="margin-bottom:0.15rem;">Streak freeze</p>
+        <p class="lang-meta">Keeps a missed day</p>
+        <button type="button" class="btn btn-primary btn-sm" id="profile-buy-freeze" style="margin-top:0.75rem;">${icons.gem} 100</button>
+      </div>
+    `
+  } else {
+    inventoryHtml = badges.map(renderBadgeTile).join('')
+  }
+
+  const mainHtml = `
+    <div class="profile-top-row">
+      <div class="profile-card profile-avatar-card">
+        <p class="lang-name" style="margin-bottom:0.15rem;">Your avatar</p>
+        <p class="lang-meta" style="margin-bottom:1rem;">Randomise for a brand new look — every pull is yours to keep, and any past one can be re-equipped for free below.</p>
+        <div class="profile-avatar-row">
+          ${renderAvatar(user, { size: 72 })}
+          <div class="profile-avatar-name-block">
+            <p class="lang-name" style="margin-bottom:0.15rem;">${
+              equippedAvatarCosmetic ? escapeHtml(equippedAvatarCosmetic.name) : 'No avatar yet'
+            }</p>
+            ${equippedAvatarCosmetic ? '<p class="profile-equipped-label">Currently equipped</p>' : ''}
+          </div>
+          <button type="button" class="btn btn-primary btn-sm" id="profile-randomize-avatar">${
+            icons.refresh
+          } Randomise (250 pts)</button>
+        </div>
+        ${
+          recentAvatars.length
+            ? `
+        <p class="lang-meta" style="margin-top:1.25rem; margin-bottom:0.6rem; font-weight:600;">Your collection</p>
+        <div class="profile-avatar-collection">
+          ${recentAvatars
+            .map(
+              (a) => `
+            <button type="button" class="avatar-collection-tile ${
+              a.equipped ? 'selected' : ''
+            }" data-cosmetic-id="${a.id}" data-equipped="${a.equipped}" title="${escapeHtml(a.name)}">
+              <img alt="" src="https://api.dicebear.com/9.x/${a.dicebearStyle}/svg?seed=${encodeURIComponent(
+                a.dicebearSeed
+              )}" />
+              <span>${escapeHtml(a.name)}</span>
+            </button>
+          `
+            )
+            .join('')}
+        </div>
+        <p class="lang-meta" style="margin-top:0.6rem;">Re-equipping anything you already own is free.</p>
+        `
+            : ''
+        }
+      </div>
+      <div class="profile-right-column">
+        <div class="profile-card profile-info-card">
+          <p class="lang-name" style="font-size:1.1rem; margin-bottom:0.15rem;">${escapeHtml(user.name)}</p>
+          <p class="lang-meta" style="margin-bottom:1rem;">${escapeHtml(handle)}${
+            joinedLabel ? ` &middot; ${joinedLabel}` : ''
+          }</p>
+          <div class="profile-stat-row">
+            <div class="profile-stat-tile">
+              <div class="profile-stat-top-row">
+                <span class="stat-icon-gem">${icons.gem}</span>
+                <span class="profile-stat-number">${points.toLocaleString()}</span>
+              </div>
+              <p class="lang-meta">points</p>
+            </div>
+            <div class="profile-stat-tile">
+              <div class="profile-stat-top-row">
+                <span class="stat-icon-flame">${icons.flame}</span>
+                <span class="profile-stat-number">${currentStreak}</span>
+              </div>
+              <p class="lang-meta">day streak</p>
+            </div>
+            <div class="profile-stat-tile">
+              <div class="profile-stat-top-row">
+                <span class="stat-icon-topics">${icons.checkCircle}</span>
+                <span class="profile-stat-number">${topicsCompleted}</span>
+              </div>
+              <p class="lang-meta">topics done</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="profile-card shop-streak-freeze-row">
+          <div>
+            <p class="lang-name" style="margin-bottom:0.15rem;">Streak insurance</p>
+            <p class="lang-meta" style="margin-bottom:0.5rem;">${streakFreezeCount} freeze${
+              streakFreezeCount === 1 ? '' : 's'
+            } in your inventory</p>
+            <p class="lang-meta" style="margin-bottom:0.6rem;">A freeze holds your streak for one missed day, spent automatically.</p>
+            <button type="button" class="pill-link" id="profile-buy-powerups">${
+              icons.shoppingBag
+            } Buy power-ups</button>
+          </div>
+          <span class="streak-insurance-icon">${icons.snowflake}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="languages-section-header">
+      <h2 class="goal-title" style="margin-bottom:0;">Inventory</h2>
+    </div>
+    <div class="filter-pill-row" style="margin-bottom:1rem;">
+      <button type="button" class="filter-pill ${profileInventoryTab === 'cosmetics' ? 'active' : ''}" data-inventory-tab="cosmetics">Cosmetics</button>
+      <button type="button" class="filter-pill ${profileInventoryTab === 'powerups' ? 'active' : ''}" data-inventory-tab="powerups">Power-ups</button>
+      <button type="button" class="filter-pill ${profileInventoryTab === 'badges' ? 'active' : ''}" data-inventory-tab="badges">Badges</button>
+    </div>
+    <div class="inventory-scroll-row" style="margin-bottom: var(--sp-6);">${inventoryHtml}</div>
+
+    <div class="languages-section-header">
+      <h2 class="goal-title" style="margin-bottom:0;">Account</h2>
+    </div>
+    <p class="lang-meta" style="margin-bottom:1rem;">Nothing here is public except your name and avatar.</p>
+    <div class="profile-card">
+      <div class="profile-account-grid">
+        <label class="field-label">Display name
+          <input type="text" id="profile-name-input" class="input" value="${escapeHtml(account.name)}" />
+        </label>
+        <label class="field-label">University email
+          <div class="input profile-account-email" style="display:flex; align-items:center; gap:0.5rem; opacity:0.75;">${icons.envelope} <span class="profile-account-email-text">${escapeHtml(
+            account.email
+          )}</span></div>
+          <span class="lang-meta">Verified</span>
+        </label>
+      </div>
+      <label class="field-label" style="display:block; margin-top:1rem;">Bio
+        <textarea id="profile-bio-input" class="input" rows="3" style="width:100%; resize:vertical;">${escapeHtml(
+          account.bio || ''
+        )}</textarea>
+      </label>
+      <div class="profile-toggle-list">
+        <label class="toggle-switch"><input type="checkbox" id="profile-toggle-streak-reminder" ${
+          account.dailyStreakReminder ? 'checked' : ''
+        } /> Daily streak reminder</label>
+        <label class="toggle-switch"><input type="checkbox" id="profile-toggle-leaderboard" ${
+          account.showOnLeaderboard ? 'checked' : ''
+        } /> Show me on the course leaderboard</label>
+        <label class="toggle-switch"><input type="checkbox" id="profile-toggle-sound" ${
+          account.soundEffectsEnabled ? 'checked' : ''
+        } /> Sound effects in lessons</label>
+      </div>
+      <div class="profile-account-actions">
+        <button type="button" class="btn btn-primary btn-sm" id="profile-save-account">${icons.check} Save changes</button>
+        <button type="button" class="btn btn-sm dialog-leave-btn" id="profile-delete-account">${icons.x} Delete account</button>
+      </div>
+    </div>
+  `
+
+  app.innerHTML =
+    renderAppShell({ topLabel: profileBreadcrumb, mainHtml }) +
+    (deleteAccountDialogOpen
+      ? `
+    <div class="dialog-overlay" id="delete-account-dialog-overlay">
+      <div class="dialog-card">
+        <div class="dialog-header">
+          <h2 class="dialog-title">Delete your account?</h2>
+          <button type="button" class="dialog-close-x" id="delete-account-dialog-x">${icons.x}</button>
+        </div>
+        <p class="dialog-body">This permanently deletes your account, progress, and owned avatars. This can't be undone.</p>
+        <div class="dialog-actions">
+          <button type="button" class="btn btn-secondary btn-sm" id="delete-account-dialog-cancel">Keep my account</button>
+          <button type="button" class="btn btn-sm dialog-leave-btn" id="delete-account-dialog-confirm">Delete account</button>
+        </div>
+      </div>
+    </div>
+  `
+      : '')
+
+  bindAppShell()
+
+  document.querySelectorAll('.inventory-tile').forEach((tile) => {
+    tile.addEventListener('click', () => {
+      const { cosmeticId, type, equipped } = tile.dataset
+      if (type === 'avatar') {
+        if (equipped !== 'true') handleAvatarEquip(cosmeticId)
+      } else {
+        handleEquip(type, equipped === 'true' ? null : cosmeticId)
+      }
+    })
+  })
+  document.querySelectorAll('.avatar-collection-tile').forEach((tile) => {
+    tile.addEventListener('click', () => {
+      if (tile.dataset.equipped !== 'true') handleAvatarEquip(tile.dataset.cosmeticId)
+    })
+  })
+  document.querySelectorAll('[data-inventory-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      profileInventoryTab = btn.dataset.inventoryTab
+      render()
+    })
+  })
+  document.querySelector('#profile-randomize-avatar').addEventListener('click', handleAvatarRandomize)
+  document.querySelector('#profile-buy-powerups').addEventListener('click', () => {
+    profileInventoryTab = 'powerups'
+    render()
+  })
+  const buyFreezeBtn = document.querySelector('#profile-buy-freeze')
+  if (buyFreezeBtn) buyFreezeBtn.addEventListener('click', handleProfileStreakFreezePurchase)
+  document.querySelector('#profile-save-account').addEventListener('click', handleSaveProfileAccount)
+  document.querySelector('#profile-delete-account').addEventListener('click', () => {
+    deleteAccountDialogOpen = true
+    render()
+  })
+  if (deleteAccountDialogOpen) {
+    document.querySelector('#delete-account-dialog-x').addEventListener('click', closeDeleteAccountDialog)
+    document.querySelector('#delete-account-dialog-cancel').addEventListener('click', closeDeleteAccountDialog)
+    document.querySelector('#delete-account-dialog-confirm').addEventListener('click', handleDeleteAccount)
+    document.querySelector('#delete-account-dialog-overlay').addEventListener('click', (e) => {
+      if (e.target.id === 'delete-account-dialog-overlay') closeDeleteAccountDialog()
+    })
+  }
+}
+
+function closeDeleteAccountDialog() {
+  deleteAccountDialogOpen = false
+  render()
+}
+
+// Shared between the Cosmetics page (browse + equip everything) and the
+// Profile page (avatar management) — both can trigger a pull/equip, so both
+// caches get invalidated; the success toast is global, so it shows up
+// regardless of which of the two pages triggered it.
+async function handleAvatarRandomize() {
+  try {
+    const result = await randomizeAvatar()
+    user.points = result.totalPoints
+    user.avatarStyle = result.avatar.dicebearStyle
+    user.avatarSeed = result.avatar.dicebearSeed
+    profilePageData = null // refetch so the new pull shows up in inventory
+    shopItems = null
+    showToast(`You got ${result.avatar.name}!`, { icon: icons.refresh })
+  } catch (err) {
+    showErrorToast(err.message)
+  }
+  render()
+}
+
+async function handleAvatarEquip(cosmeticId) {
+  try {
+    const result = await equipAvatar(cosmeticId)
+    user.avatarStyle = result.avatarStyle
+    user.avatarSeed = result.avatarSeed
+    profilePageData = null
+    shopItems = null
+    showToast('Avatar equipped.', { icon: icons.check })
+  } catch (err) {
+    showErrorToast(err.message)
+  }
+  render()
+}
+
+async function handleProfileStreakFreezePurchase() {
+  try {
+    const result = await purchaseStreakFreeze()
+    user.points = result.totalPoints
+    user.streakFreezeCount = result.streakFreezeCount
+    profilePageData = null
+    showToast('Streak freeze purchased.', { icon: icons.snowflake })
+  } catch (err) {
+    showErrorToast(err.message)
+  }
+  render()
+}
+
+async function handleSaveProfileAccount() {
+  const fields = {
+    name: document.querySelector('#profile-name-input').value,
+    bio: document.querySelector('#profile-bio-input').value,
+    dailyStreakReminder: document.querySelector('#profile-toggle-streak-reminder').checked,
+    showOnLeaderboard: document.querySelector('#profile-toggle-leaderboard').checked,
+    soundEffectsEnabled: document.querySelector('#profile-toggle-sound').checked,
+  }
+  try {
+    const result = await updateProfileAccount(fields)
+    user.name = result.user.name
+    profilePageData = null // refetch so the account section reflects the save
+    showToast('Profile saved.', { icon: icons.check })
+  } catch (err) {
+    showErrorToast(err.message)
+  }
+  render()
+}
+
+async function handleDeleteAccount() {
+  try {
+    await deleteAccount()
+  } catch (err) {
+    showErrorToast(err.message)
+    deleteAccountDialogOpen = false
+    render()
+    return
+  }
+  await handleLogout()
+}
+
+// ---- Playground ----
+
+// Colors reference CSS custom properties directly, so they stay live/correct
+// through theme switches without needing to remount the editor.
+const playgroundHighlightStyle = HighlightStyle.define([
+  { tag: tags.keyword, color: 'var(--pg-tok-kw)' },
+  { tag: tags.string, color: 'var(--pg-tok-str)' },
+  { tag: [tags.number, tags.bool, tags.null], color: 'var(--pg-tok-num)' },
+  { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], color: 'var(--pg-tok-fn)' },
+  { tag: tags.comment, color: 'var(--pg-tok-com)', fontStyle: 'italic' },
+  { tag: tags.operator, color: 'var(--pg-tok-op)' },
+])
+
+const PLAYGROUND_LANGUAGE_EXTENSIONS = {
+  JavaScript: () => javascript(),
+  Python: () => python(),
+  SQL: () => sql(),
+  'HTML & CSS': () => html(),
+  Java: () => java(),
+  'C++': () => cpp(),
+  Go: () => StreamLanguage.define(go),
+  Rust: () => StreamLanguage.define(rust),
+}
+
+const PLAYGROUND_FILE_EXTENSIONS = {
+  JavaScript: 'js',
+  Python: 'py',
+  SQL: 'sql',
+  'HTML & CSS': 'html',
+  Java: 'java',
+  'C++': 'cpp',
+  Go: 'go',
+  Rust: 'rs',
+}
+
+const PLAYGROUND_STARTER_CODE = {
+  JavaScript: "console.log('Hello, world!')",
+  Python: "print('Hello, world!')",
+  SQL: 'SELECT 1;',
+  'HTML & CSS': '<h1>Hello, world!</h1>',
+  Java: 'public class Main {\n  public static void main(String[] args) {\n    System.out.println("Hello, world!");\n  }\n}',
+  'C++':
+    '#include <iostream>\n\nint main() {\n  std::cout << "Hello, world!" << std::endl;\n  return 0;\n}',
+  Go: 'package main\n\nimport "fmt"\n\nfunc main() {\n  fmt.Println("Hello, world!")\n}',
+  Rust: 'fn main() {\n  println!("Hello, world!");\n}',
+}
+
+const PLAYGROUND_RUN_COMMANDS = {
+  JavaScript: (ext) => `node scratch.${ext}`,
+  Python: (ext) => `python scratch.${ext}`,
+  SQL: (ext) => `sqlite3 scratch.${ext}`,
+  Java: (ext) => `java scratch.${ext}`,
+  'C++': (ext) => `g++ scratch.${ext} && ./a.out`,
+  Go: (ext) => `go run scratch.${ext}`,
+  Rust: (ext) => `rustc scratch.${ext} && ./scratch`,
+  'HTML & CSS': (ext) => `open scratch.${ext}`,
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+// Resolves (and self-heals) playgroundLanguage even if /playground was never
+// visited this session — the mini playground mirrors this value, so it needs
+// a real answer regardless of which page is currently active.
+function getPlaygroundLanguage() {
+  if (!playgroundLanguage || !selectedLanguages.includes(playgroundLanguage)) {
+    playgroundLanguage = selectedLanguages[0] || 'JavaScript'
+  }
+  return playgroundLanguage
+}
+
+function renderExecutionOutput({ running, error, result, placeholder }) {
+  if (running) {
+    return '<p class="playground-output-placeholder">Running…</p>'
+  }
+  if (error) {
+    return `<p class="error-text">${escapeHtml(error)}</p>`
+  }
+  if (!result) {
+    return `<p class="playground-output-placeholder">${placeholder}</p>`
+  }
+
+  const { stdout, stderr, compileOutput, status, time, memory } = result
+  return `
+    ${stdout ? `<pre class="playground-output-text">${escapeHtml(stdout)}</pre>` : ''}
+    ${stderr ? `<pre class="playground-output-text playground-output-error">${escapeHtml(stderr)}</pre>` : ''}
+    ${
+      compileOutput
+        ? `<pre class="playground-output-text playground-output-error">${escapeHtml(compileOutput)}</pre>`
+        : ''
+    }
+    ${!stdout && !stderr && !compileOutput ? '<p class="playground-output-placeholder">No output.</p>' : ''}
+    <p class="playground-output-meta">${status || ''}${time ? ` &middot; ${time}s` : ''}${
+    memory ? ` &middot; ${Math.round(memory / 1024)} MB` : ''
+  }</p>
+  `
+}
+
+function renderPlaygroundPage() {
+  currentCourseLanguage = null
+  getPlaygroundLanguage()
+
+  const ext = PLAYGROUND_FILE_EXTENSIONS[playgroundLanguage]
+  const runCommand = (PLAYGROUND_RUN_COMMANDS[playgroundLanguage] || ((e) => `run scratch.${e}`))(ext)
+
+  const langPills = selectedLanguages
+    .map((lang) => {
+      const langMeta = SUPPORTED_LANGUAGES.find((l) => l.name === lang)
+      const active = lang === playgroundLanguage
+      const activeStyle = active
+        ? `background: var(--fill-accent); color: var(--text-on-accent); box-shadow: var(--shadow-glow-accent), var(--inner-top);`
+        : `background: transparent; color: var(--text-muted);`
+      return `<button type="button" class="playground-lang-pill" style="${activeStyle}" data-lang="${lang}"><span class="lang-glyph playground-lang-glyph" style="background:${langMeta.color}">${langMeta.glyph}</span>${lang}</button>`
+    })
+    .join('')
+
+  const mainHtml = `
+    <div class="playground-header">
+      <div>
+        <p class="eyebrow">PLAYGROUND</p>
+        <h1 class="onboarding-heading" style="margin-bottom:0.5rem;">Write whatever you like.</h1>
+        <p class="onboarding-subtext" style="max-width:56ch; margin-bottom:0;">Nothing here is graded, timed, or attached to a topic. Pick a language, run the file, keep the scratchpad open beside your lecture notes.</p>
+      </div>
+      <div class="playground-header-actions">
+        <span class="setup-chip">Scratchpad</span>
+        <button type="button" class="playground-icon-btn" id="playground-download" title="Download">${icons.download}</button>
+        <button type="button" class="playground-icon-btn" id="playground-share" title="Share">${icons.share}</button>
+      </div>
+    </div>
+
+    <div class="playground-lang-row">
+      <div class="playground-lang-selector">${langPills}</div>
+      <span class="playground-lang-note">Your picked languages. <a href="#" id="playground-add-lang">Add another</a></span>
+    </div>
+
+    <div class="playground-panes">
+      <div class="playground-pane editor-pane">
+        <div class="playground-pane-header">
+          ${icons.file}
+          <span class="playground-filename">scratch.${ext}</span>
+          <button type="button" class="playground-icon-btn sm playground-reset" title="Reset to starter code">${icons.refresh}</button>
+          <button type="button" class="btn btn-primary playground-run-btn" id="playground-run" ${
+            playgroundRunning ? 'disabled' : ''
+          }>${icons.arrowRight} ${playgroundRunning ? 'Running…' : 'Run'}</button>
+        </div>
+        <div id="playground-editor-mount" class="playground-editor-mount"></div>
+      </div>
+      <div class="playground-pane console-pane">
+        <div class="playground-pane-header">
+          ${icons.terminal}
+          <span class="playground-output-label">Output</span>
+          <span class="playground-output-cmd">${runCommand}</span>
+          <button type="button" class="playground-icon-btn sm" id="playground-clear" title="Clear output">${icons.x}</button>
+        </div>
+        <div class="playground-output" id="playground-output">${renderPlaygroundOutput()}</div>
+      </div>
+    </div>
+  `
+
+  app.innerHTML = renderAppShell({ topLabel: 'Playground', mainHtml })
+  bindAppShell()
+  mountPlaygroundEditor()
+
+  document.querySelectorAll('.playground-lang-pill').forEach((btn) => {
+    btn.addEventListener('click', () => switchPlaygroundLanguage(btn.dataset.lang))
+  })
+  document.querySelector('#playground-run').addEventListener('click', runPlaygroundCode)
+  document.querySelector('.playground-reset').addEventListener('click', resetPlaygroundCode)
+  document.querySelector('#playground-download').addEventListener('click', downloadPlaygroundCode)
+  document.querySelector('#playground-add-lang').addEventListener('click', (e) => {
+    e.preventDefault()
+    goToLanguagesPage()
+  })
+  document.querySelector('#playground-share').addEventListener('click', () => {
+    playgroundError = "Sharing isn't available yet."
+    document.querySelector('#playground-output').innerHTML = renderPlaygroundOutput()
+  })
+  document.querySelector('#playground-clear').addEventListener('click', () => {
+    playgroundResult = null
+    playgroundError = ''
+    document.querySelector('#playground-output').innerHTML = renderPlaygroundOutput()
+  })
+}
+
+// The mount element already carries structural classes (playground-editor-
+// mount, etc.) — this only ever adds/swaps one of these theme classes on top
+// of whatever's already there, never replaces className wholesale.
+const EDITOR_THEME_CLASSES = ['editor-theme-sunset', 'editor-theme-ocean', 'editor-theme-forest', 'editor-theme-midnight']
+
+// Applies the user's equipped editor-theme cosmetic (a CSS class name, e.g.
+// "editor-theme-ocean" — see src/tokens/colors.css) directly to the mount
+// element. playgroundHighlightStyle already sources every color from the
+// --pg-* custom properties those classes redefine, so this is the entire
+// theming mechanism — no CodeMirror extension/Compartment involved.
+function applyEquippedEditorTheme(mountEl) {
+  mountEl.classList.remove(...EDITOR_THEME_CLASSES)
+  const themeClass = user.equippedCosmetics?.theme?.value
+  if (themeClass) mountEl.classList.add(themeClass)
+}
+
+function mountPlaygroundEditor() {
+  const mountEl = document.querySelector('#playground-editor-mount')
+  if (!mountEl) return
+  applyEquippedEditorTheme(mountEl)
+
+  const startingCode =
+    playgroundCode[playgroundLanguage] ?? PLAYGROUND_STARTER_CODE[playgroundLanguage] ?? ''
+  const languageExtension = PLAYGROUND_LANGUAGE_EXTENSIONS[playgroundLanguage]()
+
+  const updateListener = EditorView.updateListener.of((update) => {
+    if (update.docChanged) {
+      playgroundCode[playgroundLanguage] = update.state.doc.toString()
+    }
+  })
+
+  const state = EditorState.create({
+    doc: startingCode,
+    extensions: [basicSetup, languageExtension, updateListener, syntaxHighlighting(playgroundHighlightStyle)],
+  })
+
+  playgroundEditor = new EditorView({ state, parent: mountEl })
+}
+
+function switchPlaygroundLanguage(lang) {
+  if (playgroundEditor) {
+    playgroundCode[playgroundLanguage] = playgroundEditor.state.doc.toString()
+  }
+  playgroundLanguage = lang
+  playgroundResult = null
+  playgroundError = ''
+  render()
+}
+
+function resetPlaygroundCode() {
+  playgroundCode[playgroundLanguage] = PLAYGROUND_STARTER_CODE[playgroundLanguage] ?? ''
+  render()
+}
+
+function downloadPlaygroundCode() {
+  const code = playgroundEditor ? playgroundEditor.state.doc.toString() : ''
+  const ext = PLAYGROUND_FILE_EXTENSIONS[playgroundLanguage]
+  const blob = new Blob([code], { type: 'text/plain' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `scratch.${ext}`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+async function runPlaygroundCode() {
+  if (!playgroundEditor || playgroundRunning) return
+  const code = playgroundEditor.state.doc.toString()
+
+  playgroundRunning = true
+  playgroundResult = null
+  playgroundError = ''
+  updatePlaygroundRunUi()
+
+  try {
+    playgroundResult = await executeCode(code, playgroundLanguage)
+  } catch (err) {
+    playgroundError = err.message
+  }
+  playgroundRunning = false
+  updatePlaygroundRunUi()
+}
+
+function updatePlaygroundRunUi() {
+  const output = document.querySelector('#playground-output')
+  if (output) output.innerHTML = renderPlaygroundOutput()
+  const runBtn = document.querySelector('#playground-run')
+  if (runBtn) {
+    runBtn.disabled = playgroundRunning
+    runBtn.innerHTML = `${icons.arrowRight} ${playgroundRunning ? 'Running…' : 'Run'}`
+  }
+}
+
+function renderPlaygroundOutput() {
+  const ext = PLAYGROUND_FILE_EXTENSIONS[playgroundLanguage]
+  return renderExecutionOutput({
+    running: playgroundRunning,
+    error: playgroundError,
+    result: playgroundResult,
+    placeholder: `Press Run to execute scratch.${ext}.`,
+  })
+}
+
+// ---- Mini playground (floating "Try it yourself" scratchpad) ----
+
+function renderMiniPlayground() {
+  if (!miniPlaygroundOpen) return ''
+
+  const lang = getPlaygroundLanguage()
+  const ext = PLAYGROUND_FILE_EXTENSIONS[lang]
+  const code = miniPlaygroundCode[lang] ?? PLAYGROUND_STARTER_CODE[lang] ?? ''
+  const lineCount = code.split('\n').length
+
+  return `
+    <div class="mini-playground ${miniPlaygroundExpanded ? 'expanded' : ''}">
+      <div class="playground-pane-header mini-playground-header">
+        ${icons.file}
+        <span class="mini-playground-title">Mini playground</span>
+        <span class="playground-filename">scratch.${ext}</span>
+        <button type="button" class="playground-icon-btn sm" id="mini-playground-reset" title="Reset to starter code">${icons.refresh}</button>
+        <button type="button" class="playground-icon-btn sm" id="mini-playground-expand" title="${
+          miniPlaygroundExpanded ? 'Collapse' : 'Expand'
+        }">${icons.expand}</button>
+        <button type="button" class="btn btn-primary playground-run-btn" id="mini-playground-run" ${
+          miniPlaygroundRunning ? 'disabled' : ''
+        }>${icons.arrowRight} ${miniPlaygroundRunning ? 'Running…' : 'Run'}</button>
+        <button type="button" class="playground-icon-btn sm" id="mini-playground-close" title="Close">${icons.x}</button>
+      </div>
+      <div id="mini-playground-editor-mount" class="playground-editor-mount mini-playground-editor-mount"></div>
+      <div class="mini-playground-console-row">
+        <span>Console</span>
+        <span id="mini-playground-line-count">${lineCount} LINE${lineCount === 1 ? '' : 'S'}</span>
+      </div>
+      <div class="playground-output mini-playground-output" id="mini-playground-output">${renderMiniPlaygroundOutput()}</div>
+    </div>
+  `
+}
+
+function mountMiniPlaygroundEditor() {
+  const mountEl = document.querySelector('#mini-playground-editor-mount')
+  if (!mountEl) return
+  applyEquippedEditorTheme(mountEl)
+
+  const lang = getPlaygroundLanguage()
+  const startingCode = miniPlaygroundCode[lang] ?? PLAYGROUND_STARTER_CODE[lang] ?? ''
+  const languageExtension = PLAYGROUND_LANGUAGE_EXTENSIONS[lang]()
+
+  const updateListener = EditorView.updateListener.of((update) => {
+    if (!update.docChanged) return
+    const text = update.state.doc.toString()
+    miniPlaygroundCode[lang] = text
+    const lineCountEl = document.querySelector('#mini-playground-line-count')
+    if (lineCountEl) {
+      const n = text.split('\n').length
+      lineCountEl.textContent = `${n} LINE${n === 1 ? '' : 'S'}`
+    }
+  })
+
+  const state = EditorState.create({
+    doc: startingCode,
+    extensions: [basicSetup, languageExtension, updateListener, syntaxHighlighting(playgroundHighlightStyle)],
+  })
+
+  miniPlaygroundEditor = new EditorView({ state, parent: mountEl })
+}
+
+function bindMiniPlayground() {
+  document.querySelector('#mini-playground-close').addEventListener('click', () => {
+    miniPlaygroundOpen = false
+    miniPlaygroundEditor = null
+    render()
+  })
+  document.querySelector('#mini-playground-expand').addEventListener('click', () => {
+    miniPlaygroundExpanded = !miniPlaygroundExpanded
+    render()
+  })
+  document.querySelector('#mini-playground-reset').addEventListener('click', () => {
+    const lang = getPlaygroundLanguage()
+    miniPlaygroundCode[lang] = PLAYGROUND_STARTER_CODE[lang] ?? ''
+    render()
+  })
+  document.querySelector('#mini-playground-run').addEventListener('click', runMiniPlaygroundCode)
+}
+
+function toggleMiniPlayground() {
+  miniPlaygroundOpen = !miniPlaygroundOpen
+  if (!miniPlaygroundOpen) {
+    miniPlaygroundEditor = null
+  }
+  render()
+}
+
+async function runMiniPlaygroundCode() {
+  if (!miniPlaygroundEditor || miniPlaygroundRunning) return
+  const lang = getPlaygroundLanguage()
+  const code = miniPlaygroundEditor.state.doc.toString()
+
+  miniPlaygroundRunning = true
+  miniPlaygroundResult = null
+  miniPlaygroundError = ''
+  updateMiniPlaygroundRunUi()
+
+  try {
+    miniPlaygroundResult = await executeCode(code, lang)
+  } catch (err) {
+    miniPlaygroundError = err.message
+  }
+  miniPlaygroundRunning = false
+  updateMiniPlaygroundRunUi()
+}
+
+function updateMiniPlaygroundRunUi() {
+  const output = document.querySelector('#mini-playground-output')
+  if (output) output.innerHTML = renderMiniPlaygroundOutput()
+  const runBtn = document.querySelector('#mini-playground-run')
+  if (runBtn) {
+    runBtn.disabled = miniPlaygroundRunning
+    runBtn.innerHTML = `${icons.arrowRight} ${miniPlaygroundRunning ? 'Running…' : 'Run'}`
+  }
+}
+
+function renderMiniPlaygroundOutput() {
+  return renderExecutionOutput({
+    running: miniPlaygroundRunning,
+    error: miniPlaygroundError,
+    result: miniPlaygroundResult,
+    placeholder: 'Press Run to see output.',
+  })
+}
+
+// ---- Init ----
+
+async function init() {
+  try {
+    const { user: current } = await fetchMe()
+    setUser(current)
+  } catch {
+    user = null
+  }
+  const route = parseRoute()
+  if (user?.hasCompletedOnboarding && route.name === 'course') {
+    goToCourse(route)
+  } else {
+    render()
+  }
+}
+
+init()

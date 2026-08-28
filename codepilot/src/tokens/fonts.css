@@ -1,0 +1,8 @@
+/* Font family tokens. The actual Google Fonts @import lives at the very top
+   of style.css (imports must precede all other CSS rules, including
+   Tailwind's generated output) — this file just names the fallback stacks. */
+:root {
+  --font-display: 'Bricolage Grotesque', system-ui, sans-serif;
+  --font-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+}

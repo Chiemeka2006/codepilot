@@ -1,0 +1,289 @@
+/* Color tokens. Dark is the default palette (:root); light ("parchment") is
+   an inversion, not a different hue family — same warmth throughout, applied
+   via the .theme-parchment class on <html> (see theme.js). Component-level
+   overrides for components that don't exist yet in this codebase (switch,
+   tooltip, dialog, code panel, etc.) are included for completeness — nothing
+   currently consumes most of them, since those UI pieces are future phases. */
+
+:root {
+  --surface-app: #0e0b09;
+  --surface-sunken: #141010;
+  --surface-card: #1b1613;
+  --surface-raised: #231d18;
+  --surface-hover: #2d251e;
+  --surface-active: #3a3026;
+  --surface-inverse: #fbf7f1;
+  --surface-code: #171310;
+  --bark-900: #141010;
+
+  --text-strong: #fbf7f1;
+  --text-body: #e2d7c7;
+  --text-muted: #a29584;
+  --text-faint: #7c7165;
+  --text-inverse: #141010;
+  --text-on-accent: #1b1005;
+  --text-accent: #f08f60;
+  --text-link: var(--text-accent);
+  --text-link-hover: #f7b08a;
+  --text-moss: #a2c46b;
+  --text-honey: #efc167;
+  --text-clay: #e3768a;
+  /* Not in the given palette — derived to match the fill-info role for the
+     one text usage that needs it (the onboarding "First-time setup" chip). */
+  --text-lake: #79b3ab;
+
+  --fill-accent: #e16b36;
+  --fill-accent-hover: #f08f60;
+  --fill-accent-press: #c4531f;
+  --fill-success: #7fa544;
+  --fill-warning: #e0a22f;
+  --fill-danger: #cf5268;
+  --fill-info: #4f938a;
+
+  --xp-fill: #a2c46b;
+  --streak-fill: #efc167;
+  --points-fill: #f08f60;
+  --xp-track: rgba(243, 236, 225, 0.1);
+
+  --border-subtle: rgba(243, 236, 225, 0.08);
+  --border-default: rgba(243, 236, 225, 0.14);
+  --border-strong: rgba(243, 236, 225, 0.24);
+  --border-accent: #e16b36;
+  /* Warm, amber-tinted (vs. the neutral cream --border-* tones above) —
+     ties the Profile page's stat tiles to the same hue as the streak/points
+     icons they contain, instead of a generic gray outline. */
+  --stat-tile-border: rgba(239, 193, 103, 0.28);
+
+  --focus-ring: rgba(240, 143, 96, 0.55);
+
+  --surface-accent-soft: rgba(225, 107, 54, 0.14);
+  --surface-moss-soft: rgba(127, 165, 68, 0.14);
+  --surface-honey-soft: rgba(224, 162, 47, 0.14);
+  --surface-clay-soft: rgba(207, 82, 104, 0.14);
+  --surface-lake-soft: rgba(79, 147, 138, 0.14);
+
+  --shadow-xs: 0 1px 2px rgba(8, 5, 3, 0.4);
+  --shadow-sm: 0 2px 6px rgba(8, 5, 3, 0.36);
+  --shadow-md: 0 8px 20px -6px rgba(8, 5, 3, 0.55);
+  --shadow-lg: 0 20px 44px -12px rgba(8, 5, 3, 0.65);
+  --shadow-glow-accent: 0 6px 22px -8px rgba(225, 107, 54, 0.55);
+
+  --inner-top: inset 0 1px 0 rgba(255, 243, 230, 0.06);
+  --inner-sunken: inset 0 1px 3px rgba(8, 5, 3, 0.5);
+
+  /* "On-dark" tokens — deliberately NOT redeclared under .theme-parchment
+     below, so they stay constant regardless of theme. For content that sits
+     on a surface that stays dark in both themes (the brand panel, the code
+     sample) — using the regular theme-swapping --text-* tokens there would
+     mean light mode hands you near-black text on a near-black background. */
+  --ondark-strong: #fbf7f1;
+  --ondark-body: #e2d7c7;
+  --ondark-muted: #a29584;
+  --ondark-link: #f08f60;
+  --ondark-moss: #a2c46b;
+  --ondark-moss-soft: rgba(127, 165, 68, 0.14);
+  --ondark-code-keyword: #79b3ab;
+  --ondark-border-subtle: rgba(243, 236, 225, 0.08);
+
+  /* Playground-only tokens — unlike --ondark-* / --surface-code (fixed dark
+     always, for decorative lesson-content snippets), the Playground is a
+     real tool the user works in directly, so its code/console panels swap
+     with theme like the rest of the app. Scoped separately so they don't
+     collide with the always-dark decorative tokens used elsewhere. */
+  --pg-surface: #171310;
+  --pg-chrome: #1c1712;
+  --pg-console: #141010;
+  --pg-hairline: rgba(243, 236, 225, 0.14);
+  --pg-dim: #7c7165;
+  --pg-tok-kw: #f7b08a;
+  --pg-tok-str: #c3d89a;
+  --pg-tok-num: #f6d9a0;
+  --pg-tok-fn: #79b3ab;
+  --pg-tok-com: #7c7165;
+  --pg-tok-op: #c6b8a5;
+}
+
+:root.theme-parchment {
+  --pg-surface: #f2ece1;
+  --pg-chrome: #f8f4ec;
+  --pg-console: #f2ece1;
+  --pg-hairline: #e3daca;
+  --pg-dim: #7a6c5a;
+  --pg-tok-kw: #a33a3a;
+  --pg-tok-str: #4a6626;
+  --pg-tok-num: #8a5a12;
+  --pg-tok-fn: #2f6d5e;
+  --pg-tok-com: #7a6c5a;
+  --pg-tok-op: #7a6c5a;
+}
+
+/* Phase 8 shop cosmetics — Playground editor themes. Each is a fixed,
+   deliberately-chosen palette (not theme-aware like the light/dark pair
+   above), applied directly to the CodeMirror mount element when equipped
+   (see mountPlaygroundEditor/mountMiniPlaygroundEditor in main.js) — this
+   works because playgroundHighlightStyle already sources every token color
+   from these same --pg-* custom properties, so no CodeMirror-level change is
+   needed, just redefining the properties on a more specific element. */
+.editor-theme-sunset {
+  --pg-surface: #241512;
+  --pg-chrome: #2b1917;
+  --pg-console: #1c1110;
+  --pg-hairline: rgba(255, 214, 191, 0.16);
+  --pg-dim: #9c7a70;
+  --pg-tok-kw: #f2836b;
+  --pg-tok-str: #f2b06b;
+  --pg-tok-num: #f2d38f;
+  --pg-tok-fn: #e0648a;
+  --pg-tok-com: #9c7a70;
+  --pg-tok-op: #d9a98f;
+}
+.editor-theme-ocean {
+  --pg-surface: #0d1b2a;
+  --pg-chrome: #142433;
+  --pg-console: #0a1622;
+  --pg-hairline: rgba(150, 200, 255, 0.16);
+  --pg-dim: #5c7a94;
+  --pg-tok-kw: #6ec9f2;
+  --pg-tok-str: #8fd9a8;
+  --pg-tok-num: #f2d38f;
+  --pg-tok-fn: #b39ddb;
+  --pg-tok-com: #5c7a94;
+  --pg-tok-op: #a9c6d8;
+}
+.editor-theme-forest {
+  --pg-surface: #131c14;
+  --pg-chrome: #17221a;
+  --pg-console: #0f160f;
+  --pg-hairline: rgba(200, 230, 190, 0.16);
+  --pg-dim: #7a9179;
+  --pg-tok-kw: #8fd9a8;
+  --pg-tok-str: #c3d89a;
+  --pg-tok-num: #e3c877;
+  --pg-tok-fn: #6bb3a0;
+  --pg-tok-com: #7a9179;
+  --pg-tok-op: #a9c6a0;
+}
+.editor-theme-midnight {
+  --pg-surface: #14101f;
+  --pg-chrome: #1a1428;
+  --pg-console: #100c19;
+  --pg-hairline: rgba(210, 190, 255, 0.16);
+  --pg-dim: #8479a3;
+  --pg-tok-kw: #b39ddb;
+  --pg-tok-str: #8fd9c4;
+  --pg-tok-num: #f0c987;
+  --pg-tok-fn: #7ea8e0;
+  --pg-tok-com: #8479a3;
+  --pg-tok-op: #c3b8dd;
+}
+
+/* Tailwind Typography's own plugin declares its default colors directly on
+   `.prose` itself (not on :root), with hardcoded values tuned for a light
+   background. A :root-level override has no effect on it — inheritance only
+   applies when nothing targets the element directly, and `.prose` always
+   does. So this has to target `.prose` directly too, to actually win. Not
+   repeated under .theme-parchment since each value already resolves
+   correctly per theme on its own. */
+.prose {
+  --tw-prose-body: var(--text-body);
+  --tw-prose-headings: var(--text-strong);
+  --tw-prose-lead: var(--text-muted);
+  --tw-prose-links: var(--text-link);
+  --tw-prose-bold: var(--text-strong);
+  --tw-prose-counters: var(--text-muted);
+  --tw-prose-bullets: var(--text-muted);
+  --tw-prose-hr: var(--border-default);
+  --tw-prose-quotes: var(--text-muted);
+  --tw-prose-quote-borders: var(--border-default);
+  --tw-prose-captions: var(--text-muted);
+  --tw-prose-th-borders: var(--border-default);
+  --tw-prose-td-borders: var(--border-subtle);
+  /* Code blocks stay on the always-dark code surface, same principle as the
+     brand panel's sample. Inline `code` gets its own lighter treatment. */
+  --tw-prose-pre-bg: var(--surface-code);
+  --tw-prose-pre-code: var(--ondark-body);
+  --tw-prose-code: var(--fill-accent);
+}
+
+:root.theme-parchment {
+  --surface-app: #f7f1e8;
+  --surface-sunken: #efe7da;
+  --surface-card: #fffdf9;
+  --surface-raised: #ffffff;
+  --surface-hover: #f1e9dc;
+  --surface-active: #e7dcca;
+  --surface-inverse: #141010;
+  --surface-code: #1f1915; /* code surface stays dark in both themes */
+  --bark-900: #141010;
+
+  --text-strong: #241c15;
+  --text-body: #3d332a;
+  --text-muted: #6e6153;
+  --text-faint: #918476;
+  --text-inverse: #fbf7f1;
+  --text-on-accent: #fff6ee;
+  --text-accent: #c4531f;
+  --text-link: var(--text-accent);
+  --text-link-hover: #e16b36;
+  --text-moss: #628233;
+  --text-honey: #b87f1c;
+  --text-clay: #a93b50;
+  --text-lake: #3a7169;
+
+  --fill-accent: #c4531f;
+  --fill-accent-hover: #e16b36;
+  --fill-accent-press: #9b3f16;
+  --fill-success: #628233;
+  --fill-warning: #b87f1c;
+  --fill-danger: #a93b50;
+  --fill-info: #3a7169;
+
+  --xp-fill: #7fa544;
+  --streak-fill: #e0a22f;
+  --points-fill: #e16b36;
+  --xp-track: rgba(36, 28, 21, 0.1);
+
+  --border-subtle: rgba(36, 28, 21, 0.09);
+  --border-default: rgba(36, 28, 21, 0.15);
+  --border-strong: rgba(36, 28, 21, 0.28);
+  --border-accent: #c4531f;
+  --stat-tile-border: rgba(224, 162, 47, 0.35);
+
+  --focus-ring: rgba(196, 83, 31, 0.4);
+
+  --surface-accent-soft: rgba(225, 107, 54, 0.13);
+  --surface-moss-soft: rgba(98, 130, 51, 0.15);
+  --surface-honey-soft: rgba(184, 127, 28, 0.16);
+  --surface-clay-soft: rgba(169, 59, 80, 0.12);
+  --surface-lake-soft: rgba(58, 113, 105, 0.13);
+
+  --shadow-xs: 0 1px 2px rgba(58, 44, 30, 0.1);
+  --shadow-sm: 0 2px 6px rgba(58, 44, 30, 0.09);
+  --shadow-md: 0 10px 24px -8px rgba(58, 44, 30, 0.18);
+  --shadow-lg: 0 24px 48px -14px rgba(58, 44, 30, 0.26);
+  --shadow-glow-accent: 0 6px 18px -8px rgba(225, 107, 54, 0.5);
+
+  --inner-top: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  --inner-sunken: inset 0 1px 2px rgba(58, 44, 30, 0.1);
+}
+
+/* Component-level overrides — kept alongside the tokens even though most of
+   these components don't exist in the codebase yet (switch, tooltip,
+   dialog, code panel are all future phases, not built here). Applied now:
+   only the ones with a real element today. */
+.avatar-fallback {
+  background: var(--surface-active);
+}
+
+/* Inline `code` (not code inside a pre block) in lesson content. */
+.prose :not(pre) > code {
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-default);
+  border-radius: 0.3em;
+  padding: 0.15em 0.4em;
+}
+.theme-parchment .prose :not(pre) > code {
+  background: rgba(36, 28, 21, 0.05);
+  border-color: rgba(36, 28, 21, 0.12);
+  color: #9b3f16;
+}
