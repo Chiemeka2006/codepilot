@@ -457,6 +457,18 @@ body {
   width: 100%;
   max-width: 380px;
 }
+@media (max-width: 640px) {
+  /* .form-topbar is absolutely positioned in the top-right corner, floating
+     independently of .form-card's vertical centering. "Welcome back" (login)
+     is short enough to clear it, but "Create your account" (register) is
+     long enough to run underneath it. Top-align + reserve clearance instead
+     of centering, so the card always sits below the pill row regardless of
+     which heading is showing. */
+  .form-panel {
+    align-items: flex-start;
+    padding-top: 5.5rem;
+  }
+}
 .form-title {
   font-family: var(--font-display);
   font-size: 25px;
@@ -506,6 +518,23 @@ body {
   font-size: 12px;
   font-weight: 600;
   line-height: 1.4;
+}
+/* The topbar chip crowds .onboarding-topbar's justify-content:space-between
+   row on narrow screens (logo + chip on the left competing with streak/
+   points/theme/avatar on the right, none of it wrapping). Below 640px, hide
+   it there and show a second copy at the top of .onboarding-body instead —
+   under the topbar's divider line, right before the page's actual content. */
+.setup-chip-mobile {
+  display: none;
+}
+@media (max-width: 640px) {
+  .onboarding-topbar-left .setup-chip:not(.setup-chip-mobile) {
+    display: none;
+  }
+  .setup-chip-mobile {
+    display: inline-flex;
+    margin-bottom: 0.75rem;
+  }
 }
 .onboarding-body {
   max-width: 940px;
@@ -1524,6 +1553,20 @@ body {
   align-items: center;
   gap: 1rem;
 }
+@media (max-width: 640px) {
+  /* Side by side, "163 topics unlocked" plus the button's own text both
+     fighting for space forced the button's label to wrap onto two lines.
+     Stack the button under the count instead, full width, once there's not
+     enough room to comfortably fit both on one line. */
+  .onboarding-footer-right {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.6rem;
+  }
+  .onboarding-footer-right .btn {
+    width: 100%;
+  }
+}
 .topics-unlocked {
   color: var(--text-muted);
   font-size: 12px;
@@ -1982,6 +2025,14 @@ body {
 @media (max-width: 900px) {
   .lesson-layout {
     flex-direction: column;
+    /* align-items:flex-start (set above) governs the CROSS axis, which
+       becomes horizontal once flex-direction switches to column — without
+       overriding it, .lesson-main and .lesson-toc size to their own
+       max-content width instead of stretching to fill the available width.
+       For a block of prose text that means sizing as if it weren't allowed
+       to wrap at all, silently making .lesson-main (and the whole page)
+       far wider than the viewport with no visibly obvious cause. */
+    align-items: stretch;
   }
 }
 .lesson-main {
@@ -2334,6 +2385,15 @@ body {
   height: 32px;
   border-radius: 10px;
 }
+/* .playground-pane-header packs a lot into one row (icon, title, filename,
+   reset/expand/run/close buttons) — the interactive buttons must never be
+   the ones sacrificed to overflow, since .mini-playground clips overflow
+   and the close button is last in the row. Text labels shrink/truncate
+   instead (see .playground-filename / .mini-playground-title below). */
+.playground-pane-header .playground-icon-btn,
+.playground-pane-header .playground-run-btn {
+  flex-shrink: 0;
+}
 
 .playground-lang-row {
   display: flex;
@@ -2426,6 +2486,10 @@ body {
 }
 .playground-filename {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--font-mono);
   font-size: 13px;
   color: var(--text-body);
@@ -2540,6 +2604,18 @@ body {
   font-size: 13px;
   color: var(--text-body);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+@media (max-width: 720px) {
+  /* Same breakpoint the panel itself switches to full-width at — the header
+     row (icon, title, filename, reset/expand/run/close) is too crowded to
+     fit the title text too at that width, so drop it; the file icon still
+     identifies the panel. */
+  .mini-playground-title {
+    display: none;
+  }
 }
 .mini-playground-editor-mount {
   flex: none;
@@ -2933,6 +3009,12 @@ body.mobile-menu-open {
     left: 0;
     z-index: 1000;
     height: 100vh;
+    /* 100vh on mobile is measured against the largest possible viewport,
+       taller than what's actually visible once the browser's address bar
+       is showing — that pushed the bottom nav items (Log out) off-screen
+       with no way to scroll to them. 100dvh tracks the real visible height;
+       browsers without dvh support silently keep the 100vh fallback above. */
+    height: 100dvh;
     transform: translateX(-100%);
     transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     box-shadow: 4px 0 20px rgba(8, 5, 3, 0.4);
@@ -2945,8 +3027,17 @@ body.mobile-menu-open {
 
   /* Overlay backdrop — visible only when the .overlay-open class is present.
      Uses opacity/visibility + transition instead of display:none/block
-     so the backdrop fades in/out smoothly alongside the sidebar slide. */
+     so the backdrop fades in/out smoothly alongside the sidebar slide.
+     display:block is still needed here though — the unconditional
+     .sidebar-overlay{display:none} rule above (meant for desktop, where
+     there's no mobile menu at all) is never countered by this block
+     otherwise, since opacity/visibility don't touch `display`. Without it
+     the overlay never participates in layout at any viewport width, so it
+     has no box to actually receive clicks on — "click outside to close"
+     silently does nothing, clicks pass straight through to the page
+     content behind it. */
   .sidebar-overlay {
+    display: block;
     position: fixed;
     top: 0;
     left: 0;

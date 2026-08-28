@@ -54,6 +54,12 @@ let user = null
 let authMode = 'login' // 'login' | 'register'
 let error = ''
 let notice = ''
+// Carries the just-registered credentials over to the login form so the
+// user isn't retyping what they just entered — cleared once consumed by
+// renderLoginForm() so a later, unrelated visit to the login form starts
+// blank again.
+let prefillLoginEmail = ''
+let prefillLoginPassword = ''
 let languagesPageError = ''
 let selectedLanguages = []
 let selectedGoal = 'steady' // 'chill' | 'steady' | 'serious' — synced from user.dailyGoalTier, persisted via updateLanguages/saveOnboarding
@@ -507,7 +513,6 @@ function renderAppShell({ topLabel, mainHtml }) {
           <button type="button" class="sidebar-nav-item ${
             routeName === 'home' || routeName === 'languages' ? 'active' : ''
           }" id="nav-home">${icons.home} Home</button>
-          <button type="button" class="sidebar-nav-item">${icons.compass} Explore tracks</button>
           <button type="button" class="sidebar-nav-item ${
             routeName === 'quiz-collection' || routeName === 'quiz-session' ? 'active' : ''
           }" id="nav-quiz">${icons.clipboardList} Quiz collection</button>
@@ -539,7 +544,7 @@ function renderAppShell({ topLabel, mainHtml }) {
             <span class="stat-pill"><span class="stat-icon-gem">${icons.gem}</span>${user.points.toLocaleString()}</span>
             ${themeToggleButton()}
             <button type="button" class="btn btn-primary btn-sm topbar-try-btn" id="try-it-yourself">${
-              icons.person
+              icons.terminal
             } <span class="try-btn-text">Try it yourself</span></button>
             <button type="button" class="bell-btn" title="Notifications">${icons.bell}</button>
             ${renderAvatar(user)}
@@ -660,15 +665,14 @@ function renderAuthPage() {
       render()
     })
   }
-  const passwordToggle = document.querySelector('#toggle-password-visibility')
-  if (passwordToggle) {
+  document.querySelectorAll('.toggle-password-visibility').forEach((passwordToggle) => {
     passwordToggle.addEventListener('click', () => {
-      const input = document.querySelector('#login-password')
+      const input = passwordToggle.previousElementSibling
       const showing = input.type === 'text'
       input.type = showing ? 'password' : 'text'
       passwordToggle.innerHTML = showing ? icons.eye : icons.eyeOff
     })
-  }
+  })
 }
 
 function switchAuthMode() {
@@ -679,6 +683,13 @@ function switchAuthMode() {
 }
 
 function renderLoginForm() {
+  // Consumed once, then cleared, so a later unrelated visit to this form
+  // (e.g. after logging out) starts blank rather than reshowing stale
+  // just-registered credentials.
+  const emailValue = prefillLoginEmail
+  const passwordValue = prefillLoginPassword
+  prefillLoginEmail = ''
+  prefillLoginPassword = ''
   return `
     <h1 class="form-title">Welcome back</h1>
     <p class="form-subtext">Good to see you again — let's keep the streak going.</p>
@@ -687,14 +698,18 @@ function renderLoginForm() {
         <label class="field-label" for="email">Email</label>
         <div class="input-wrap">
           <span class="input-icon">${icons.envelope}</span>
-          <input id="email" name="email" type="email" placeholder="you@uni.edu" required class="input input-with-icon" />
+          <input id="email" name="email" type="email" placeholder="you@uni.edu" required class="input input-with-icon" value="${escapeHtml(
+            emailValue
+          )}" />
         </div>
       </div>
       <div>
         <label class="field-label" for="login-password">Password</label>
         <div class="input-wrap">
-          <input id="login-password" name="password" type="password" placeholder="Password" required class="input input-with-icon-right" />
-          <button type="button" id="toggle-password-visibility" class="input-icon-right">${icons.eye}</button>
+          <input id="login-password" name="password" type="password" placeholder="Password" required class="input input-with-icon-right" value="${escapeHtml(
+            passwordValue
+          )}" />
+          <button type="button" class="input-icon-right toggle-password-visibility">${icons.eye}</button>
         </div>
       </div>
       <div style="display:flex; align-items:center; justify-content:space-between;">
@@ -736,7 +751,10 @@ function renderRegisterForm() {
       </div>
       <div>
         <label class="field-label" for="reg-password">Password</label>
-        <input id="reg-password" name="password" type="password" placeholder="8+ characters" required minlength="8" class="input" />
+        <div class="input-wrap">
+          <input id="reg-password" name="password" type="password" placeholder="8+ characters" required minlength="8" class="input input-with-icon-right" />
+          <button type="button" class="input-icon-right toggle-password-visibility">${icons.eye}</button>
+        </div>
       </div>
       <label class="checkbox-row">
         <input type="checkbox" name="agree" required />
@@ -760,6 +778,8 @@ async function handleAuthSubmit(e) {
     if (authMode === 'register') {
       await register(payload)
       authMode = 'login'
+      prefillLoginEmail = payload.email
+      prefillLoginPassword = payload.password
       error = ''
       notice = 'Account created — log in below.'
     } else {
@@ -865,6 +885,7 @@ function renderOnboardingAvatarStep() {
         </div>
       </div>
       <div class="onboarding-body">
+        <span class="setup-chip setup-chip-mobile">&bull; First-time setup</span>
         <p class="eyebrow">WELCOME, ${user.name.toUpperCase()} &middot; STEP 1 OF 2</p>
         <h1 class="onboarding-heading">Pick your avatar.</h1>
         <p class="onboarding-subtext">This is how you show up on leaderboards. Three to start with — you can change it, and unlock more, from your profile.</p>
@@ -941,6 +962,7 @@ function renderOnboardingLanguagesStep() {
         </div>
       </div>
       <div class="onboarding-body">
+        <span class="setup-chip setup-chip-mobile">&bull; First-time setup</span>
         <p class="eyebrow">WELCOME, ${user.name.toUpperCase()} &middot; STEP 2 OF 2</p>
         <h1 class="onboarding-heading">What do you want to learn?</h1>
         <p class="onboarding-subtext">Pick as many languages as you like — each one adds its chapters and topics to your sidebar. You can add or drop a language any time from your settings.</p>
