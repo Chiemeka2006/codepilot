@@ -23,6 +23,7 @@ import {
   updateProfileAccount,
   deleteAccount,
   fetchHome,
+  fetchLeaderboard,
 } from './api.js'
 import { SUPPORTED_LANGUAGES } from '../shared/languages.js'
 import { icons } from './icons.js'
@@ -147,6 +148,14 @@ let profilePageLoading = false
 let profileInventoryTab = 'cosmetics' // 'cosmetics' | 'powerups' | 'badges'
 let deleteAccountDialogOpen = false
 
+// Rankings page state — refetched whenever the metric or period changes
+// (both are server-side, not a client-side re-sort of cached data).
+let rankingsData = null // { leaderboard, me, metric, period } from GET /api/leaderboard
+let rankingsLoading = false
+let rankingsError = ''
+let rankingsMetric = 'points' // 'points' | 'streaks' | 'quizzes'
+let rankingsPeriod = 'week' // 'week' | 'month' | 'all'
+
 // Toast notifications — a global stack (any page using renderAppShell can
 // trigger one), rendered bottom-right, auto-dismissing. Replaces the old
 // per-page inline green "notice-text" success messages (shop purchases,
@@ -217,6 +226,9 @@ function parseRoute() {
   }
   if (parts[0] === 'profile') {
     return { name: 'profile' }
+  }
+  if (parts[0] === 'rankings') {
+    return { name: 'rankings' }
   }
   if (parts[0] === 'quiz') {
     if (parts[1] && parts[2] && parts[3]) {
@@ -299,6 +311,13 @@ function goToProfilePage() {
   render()
 }
 
+function goToRankingsPage() {
+  currentCourseLanguage = null
+  closeMobileMenu()
+  window.history.pushState({}, '', '/rankings')
+  render()
+}
+
 function goToQuizSession(language, chapterSlug, topicSlug) {
   currentCourseLanguage = null
   closeMobileMenu()
@@ -341,6 +360,8 @@ function render() {
     renderCosmeticsPage()
   } else if (parseRoute().name === 'profile') {
     renderProfilePage()
+  } else if (parseRoute().name === 'rankings') {
+    renderRankingsPage()
   } else if (parseRoute().name === 'quiz-collection') {
     renderQuizCollectionPage()
   } else if (parseRoute().name === 'quiz-session') {
@@ -517,6 +538,9 @@ function renderAppShell({ topLabel, mainHtml }) {
             routeName === 'quiz-collection' || routeName === 'quiz-session' ? 'active' : ''
           }" id="nav-quiz">${icons.clipboardList} Quiz collection</button>
           <button type="button" class="sidebar-nav-item ${
+            routeName === 'rankings' ? 'active' : ''
+          }" id="nav-rankings">${icons.trophy} Rankings</button>
+          <button type="button" class="sidebar-nav-item ${
             routeName === 'playground' ? 'active' : ''
           }" id="nav-playground">${icons.terminal} Playground</button>
           <button type="button" class="sidebar-nav-item ${
@@ -570,6 +594,7 @@ function bindAppShell() {
   document.querySelector('#nav-playground').addEventListener('click', goToPlayground)
   document.querySelector('#nav-add-language').addEventListener('click', goToLanguagesPage)
   document.querySelector('#nav-quiz').addEventListener('click', goToQuizCollection)
+  document.querySelector('#nav-rankings').addEventListener('click', goToRankingsPage)
   document.querySelector('#nav-cosmetics').addEventListener('click', goToCosmeticsPage)
   document.querySelector('#nav-profile').addEventListener('click', goToProfilePage)
   document.querySelector('#nav-logout').addEventListener('click', handleLogout)
@@ -1632,6 +1657,178 @@ function renderQuizCollectionPage() {
     document.querySelectorAll('.quiz-topic-card').forEach((card) => {
       card.style.display = card.dataset.topicTitle.includes(q) ? '' : 'none'
     })
+  })
+}
+
+// ---- Rankings (leaderboard) ----
+
+const RANKING_METRICS = [
+  { id: 'points', label: 'Points', icon: icons.gem },
+  { id: 'streaks', label: 'Streaks', icon: icons.flame },
+  { id: 'quizzes', label: 'Quizzes done', icon: icons.clipboardList },
+]
+const RANKING_PERIODS = [
+  { id: 'week', label: 'This week' },
+  { id: 'month', label: 'This month' },
+  { id: 'all', label: 'All time' },
+]
+
+async function loadRankingsData() {
+  rankingsLoading = true
+  rankingsError = ''
+  render()
+  try {
+    rankingsData = await fetchLeaderboard(rankingsMetric, rankingsPeriod)
+  } catch (err) {
+    rankingsError = err.message
+  }
+  rankingsLoading = false
+  render()
+}
+
+function setRankingsMetric(metric) {
+  if (metric === rankingsMetric) return
+  rankingsMetric = metric
+  loadRankingsData()
+}
+
+function setRankingsPeriod(period) {
+  if (period === rankingsPeriod) return
+  rankingsPeriod = period
+  loadRankingsData()
+}
+
+function renderMovementBadge(movement) {
+  if (movement === null || movement === undefined) {
+    return `<span class="rank-move rank-move-flat">${icons.minus}</span>`
+  }
+  if (movement > 0) {
+    return `<span class="rank-move rank-move-up">${icons.arrowUp} ${movement}</span>`
+  }
+  if (movement < 0) {
+    return `<span class="rank-move rank-move-down">${icons.arrowDown} ${Math.abs(movement)}</span>`
+  }
+  return `<span class="rank-move rank-move-flat">${icons.minus}</span>`
+}
+
+function renderRankingsRow(entry) {
+  const handle = `@${entry.name.toLowerCase().replace(/\s+/g, '')}`
+  const avatarUser = {
+    name: entry.name,
+    avatarSeed: entry.avatarSeed,
+    avatarStyle: entry.avatarStyle,
+    equippedCosmetics: { border: { value: entry.borderColor } },
+  }
+  return `
+    <div class="leaderboard-row ${entry.isMe ? 'me' : ''}">
+      <span class="leaderboard-rank">${entry.rank <= 3 ? `#${entry.rank}` : entry.rank}</span>
+      <div class="leaderboard-learner">
+        ${renderAvatar(avatarUser, { size: 34 })}
+        <div class="leaderboard-learner-info">
+          <span class="leaderboard-learner-name">${escapeHtml(entry.name)}${
+    entry.isMe ? '<span class="leaderboard-you-pill">You</span>' : ''
+  }</span>
+          <span class="leaderboard-learner-handle">${escapeHtml(handle)}</span>
+        </div>
+      </div>
+      <span class="leaderboard-col leaderboard-streak"><span class="stat-icon-flame">${icons.flame}</span>${entry.streak}</span>
+      <span class="leaderboard-col leaderboard-quizzes"><span class="stat-icon-quiz">${icons.clipboardList}</span>${entry.quizzesFinished}</span>
+      <span class="leaderboard-col leaderboard-move">${renderMovementBadge(entry.movement)}</span>
+      <span class="leaderboard-col leaderboard-points"><span class="stat-icon-gem">${icons.gem}</span>${entry.points.toLocaleString()}</span>
+    </div>
+  `
+}
+
+function renderRankingsPage() {
+  currentCourseLanguage = null
+
+  if (!rankingsData && !rankingsLoading && !rankingsError) {
+    loadRankingsData()
+  }
+
+  const metricPills = RANKING_METRICS.map(
+    (m) =>
+      `<button type="button" class="segmented-option ${
+        rankingsMetric === m.id ? 'active' : ''
+      }" data-ranking-metric="${m.id}">${m.icon} ${m.label}</button>`
+  ).join('')
+
+  const periodPills = RANKING_PERIODS.map(
+    (p) =>
+      `<button type="button" class="segmented-option ${
+        rankingsPeriod === p.id ? 'active' : ''
+      }" data-ranking-period="${p.id}">${p.label}</button>`
+  ).join('')
+
+  let bodyHtml
+  if (rankingsError) {
+    bodyHtml = `<p class="error-text">${escapeHtml(rankingsError)}</p>`
+  } else if (rankingsLoading || !rankingsData) {
+    bodyHtml = '<p>Loading…</p>'
+  } else {
+    const me = rankingsData.me
+    const periodLabel = RANKING_PERIODS.find((p) => p.id === rankingsPeriod)?.label.toLowerCase() || 'this period'
+
+    bodyHtml = `
+      <div class="cosmetics-stats-row">
+        <div class="profile-card cosmetics-stat-card">
+          <div>
+            <p class="quiz-summary-value">${me ? `#${me.rank}` : '—'}</p>
+            <p class="quiz-summary-label">my rank</p>
+          </div>
+        </div>
+        <div class="profile-card cosmetics-stat-card">
+          <div>
+            <p class="quiz-summary-value">${(me?.points ?? 0).toLocaleString()}</p>
+            <p class="quiz-summary-label">points ${periodLabel}</p>
+          </div>
+        </div>
+        <div class="profile-card cosmetics-stat-card">
+          <div>
+            <p class="quiz-summary-value">${me?.quizzesFinished ?? 0}</p>
+            <p class="quiz-summary-label">quizzes finished</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="segmented-row">
+        <div class="segmented-control">${metricPills}</div>
+        <div class="segmented-control">${periodPills}</div>
+      </div>
+
+      <div class="leaderboard-table">
+        <div class="leaderboard-row leaderboard-head">
+          <span class="leaderboard-rank">#</span>
+          <span class="leaderboard-learner">Learner</span>
+          <span class="leaderboard-col">Streak</span>
+          <span class="leaderboard-col">Quizzes</span>
+          <span class="leaderboard-col">Move</span>
+          <span class="leaderboard-col">Points</span>
+        </div>
+        ${rankingsData.leaderboard.map(renderRankingsRow).join('')}
+      </div>
+    `
+  }
+
+  const mainHtml = `
+    <div class="languages-page-header">
+      <div>
+        <p class="eyebrow">RANKINGS</p>
+        <h1 class="onboarding-heading" style="margin-bottom:0.5rem;">Where you stand.</h1>
+        <p class="onboarding-subtext" style="max-width:60ch; margin-bottom:0;">Ranked on whichever metric you pick below, for the period you pick — everyone with rankings visibility on, platform-wide.</p>
+      </div>
+    </div>
+    ${bodyHtml}
+  `
+
+  app.innerHTML = renderAppShell({ topLabel: 'Rankings', mainHtml })
+  bindAppShell()
+
+  document.querySelectorAll('[data-ranking-metric]').forEach((btn) => {
+    btn.addEventListener('click', () => setRankingsMetric(btn.dataset.rankingMetric))
+  })
+  document.querySelectorAll('[data-ranking-period]').forEach((btn) => {
+    btn.addEventListener('click', () => setRankingsPeriod(btn.dataset.rankingPeriod))
   })
 }
 

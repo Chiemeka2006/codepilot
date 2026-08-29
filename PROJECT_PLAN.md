@@ -90,7 +90,26 @@
 - [✅] Custom code editor themes: store selected theme per user, apply to Phase 5's editor component
 - [✅] UI: shop/store page showing available perks, owned vs. lockable, point balance
 
-## Phase 9: UI Polish
+## Phase 9: Leaderboard / Rankings — ✅ built 2026-08-29
+*New feature, added to the plan 2026-08-29, built the same day. Sequenced before UI Polish so the new page is covered by that phase's final consistency pass rather than shipping unpolished.*
+
+Final shape (no scope tabs — an earlier My course/Friends/Everyone split was dropped before build): a `/rankings` page reachable from the sidebar (trophy icon, between Quiz collection and Playground), everyone ranked together platform-wide, three top stat cards (my rank, points this period, quizzes finished this period), a **metric pill** (**Points** / **Streaks** / **Quizzes done**) that switches which column the table is ranked/sorted by, a period tab row (**This week** / **This month** / **All time**), and a ranked table (rank, learner name/handle/avatar, streak, quizzes finished, rank movement vs. previous period, points) with the current user's row highlighted.
+
+- [✅] "Points"/"quizzes done" this period reuses `User.dailyActivityLog`, not a dedicated ledger — the cap was bumped from 14 to 31 entries (`utils/activity.js`'s `ACTIVITY_LOG_MAX_ENTRIES`) specifically so a rolling 30-day "this month" window has enough history to sum over; the home page still only ever displays the last 7. `dailyActivityLog` entries gained a `quizzesFinished` field (incremented alongside `pointsEarned` by `recordActivity(userId, { quizFinished: true })`, called from `quizController`'s round-banking); `User` also gained a `lifetimeQuizzesFinished` counter (mirrors `lifetimePointsEarned`) to back the "All time" view without summing the capped log.
+- [✅] No real cron/scheduler was built — "This week"/"This month" are a rolling N-day window computed on read (last 7 or last 30 days including today), not a true calendar week/month reset. This matches the rolling-window simplification `homeController`'s `pointsThisWeek` already made, rather than introducing a second, inconsistent convention.
+- [✅] Week/month boundary: rolling window (see above), not calendar-aligned — chosen for consistency with the existing precedent rather than introducing calendar-month day-count edge cases.
+- [✅] "Quizzes finished" = banked quiz rounds (the adaptive quiz's 10-question cap being hit and points banking), counted via the same `recordActivity` call site as points banking — never raw questions answered.
+- [✅] Streaks metric ranks by `User.currentStreak` directly — a live value, so it reads the same across all three period tabs by design (no separate streak history/reset logic needed).
+- [✅] Rank movement is only computed for **period = This week** (↑N / ↓N vs. the immediately preceding 7-day window, diffed from the same `dailyActivityLog` data — no snapshot table needed). It's `null` (rendered as —) for **This month** (would need 60 days of log history against a 31-entry cap) and for the **Streaks** metric (a live value has no distinct "previous period" to diff against).
+- [✅] Confirmed platform-wide scope, no My course/Friends split — no "primary track" ambiguity to resolve and no friends/social system needed.
+- [✅] Backend: `GET /api/leaderboard?metric=points|streaks|quizzes&period=week|month|all` (`controllers/leaderboardController.js`, `routes/leaderboardRoutes.js`) returns `{ leaderboard, me, metric, period }` — mirrors the `/api/home`/`/api/profile` "aggregate everything in one call" pattern.
+- [✅] Ranking is computed live via a `User.find()` + in-memory sort, no denormalized `LeaderboardEntry` collection — fine at current scale; revisit if the user count grows enough to make a full scan/sort per request expensive.
+- [✅] Sidebar nav entry — "Rankings" with a new `icons.trophy` glyph, between "Quiz collection" and "Playground".
+- [✅] Frontend: stat cards (reusing the Cosmetics page's `.cosmetics-stats-row`/`.profile-card` pattern), metric pill + period tab row (reusing `.filter-pill`), a new `.leaderboard-table`/`.leaderboard-row` component with a highlighted "You" row and up/down/flat movement badges, avatars via the existing `renderAvatar()` helper.
+- [✅] `showOnLeaderboard` opt-out respected: `getLeaderboard` queries `{ $or: [{ showOnLeaderboard: { $ne: false } }, { _id: currentUserId }] }` — an opted-out user is excluded from everyone else's view but still sees their own row (and rank) in their own view.
+- [ ] Mobile responsive pass — only a minimal breakpoint was added (hides the Streak/Quizzes columns under 700px so Rank/Learner/Move/Points still fit); a fuller pass is deferred to Phase 10 alongside the rest of the app.
+
+## Phase 10: UI Polish
 - [ ] Apply consistent Tailwind design system across all pages (colors, spacing, typography)
 - [ ] Split-pane layout for lesson pages (content left, editor/output right)
 - [ ] Progress indicators: per-chapter completion, per-course progress bar
@@ -103,4 +122,5 @@
 ## Notes
 - Phases 4–6 carry the most technical weight and grading value — don't under-invest time there relative to auth/profile.
 - Phase 5 (code editor) is the single biggest risk to timeline — start research early even if implementation comes later.
-- UI polish (Phase 9) will realistically happen gradually alongside each phase, not only at the end.
+- UI polish (Phase 10) will realistically happen gradually alongside each phase, not only at the end.
+- Phase 9 (Leaderboard) is a late addition on top of the original 9-phase plan, inserted before UI Polish so the new page gets covered by that phase's final pass — weigh its scope (especially the Friends system) against remaining time budget before committing to all of it.

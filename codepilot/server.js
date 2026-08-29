@@ -12,6 +12,7 @@ import { quizRoutes } from './routes/quizRoutes.js'
 import { shopRoutes } from './routes/shopRoutes.js'
 import { profileRoutes } from './routes/profileRoutes.js'
 import { homeRoutes } from './routes/homeRoutes.js'
+import { leaderboardRoutes } from './routes/leaderboardRoutes.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -33,6 +34,7 @@ app.use('/api/quiz', quizRoutes)
 app.use('/api/shop', shopRoutes)
 app.use('/api/profile', profileRoutes)
 app.use('/api/home', homeRoutes)
+app.use('/api/leaderboard', leaderboardRoutes)
 
 // Anything that isn't a static asset or an API route falls back to
 // index.html, so client-side routing (once added) still works on refresh.

@@ -99,6 +99,13 @@ const userSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    // Total banked quiz rounds ever completed — the "All time" leaderboard's
+    // quizzes-done metric. Kept in sync exclusively by utils/activity.js's
+    // recordActivity() when called with quizFinished:true.
+    lifetimeQuizzesFinished: {
+      type: Number,
+      default: 0,
+    },
     earnedBadges: [
       {
         badge: { type: mongoose.Schema.Types.ObjectId, ref: 'Badge', required: true },
@@ -135,14 +142,17 @@ const userSchema = new mongoose.Schema(
     },
     // One entry per calendar day (UTC) with any activity — powers the home
     // page's weekly calendar, "points this week", and "streak increased
-    // today" without three separate ad-hoc counters. Trimmed to the last 14
-    // entries by utils/activity.js on every write; only the last 7 are ever
-    // displayed.
+    // today" without three separate ad-hoc counters, and (since the
+    // Leaderboard) the rankings page's This week/This month windows.
+    // Trimmed to the last 31 entries by utils/activity.js on every write —
+    // bumped up from 14 specifically so a rolling 30-day "this month" window
+    // has enough history; the home page still only ever displays the last 7.
     dailyActivityLog: [
       {
         date: { type: Date, required: true },
         pointsEarned: { type: Number, default: 0 },
         topicsCompleted: { type: Number, default: 0 },
+        quizzesFinished: { type: Number, default: 0 },
       },
     ],
     // Updated on every lesson view (not just first-time completions) so the
@@ -179,6 +189,7 @@ userSchema.methods.toPublicJSON = function () {
     currentStreak: this.currentStreak,
     streakFreezeCount: this.streakFreezeCount,
     lifetimePointsEarned: this.lifetimePointsEarned,
+    lifetimeQuizzesFinished: this.lifetimeQuizzesFinished,
     bio: this.bio,
     dailyStreakReminder: this.dailyStreakReminder,
     showOnLeaderboard: this.showOnLeaderboard,

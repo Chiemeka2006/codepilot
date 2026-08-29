@@ -134,3 +134,7 @@ export function deleteAccount() {
 export function fetchHome() {
   return request('/api/home')
 }
+
+export function fetchLeaderboard(metric, period) {
+  return request(`/api/leaderboard?metric=${encodeURIComponent(metric)}&period=${encodeURIComponent(period)}`)
+}

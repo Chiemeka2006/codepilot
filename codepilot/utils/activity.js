@@ -1,7 +1,9 @@
 import { User } from '../models/User.js'
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000
-const ACTIVITY_LOG_MAX_ENTRIES = 14
+// 31, not 14 — the Leaderboard's "this month" rolling window needs 30 days
+// of history to sum over; the home page still only ever displays the last 7.
+const ACTIVITY_LOG_MAX_ENTRIES = 31
 
 // Deliberately UTC calendar day, not per-user local time — a known
 // simplification. This is a gamification stat, not a security boundary, so
@@ -19,10 +21,16 @@ function utcMidnight(date) {
 // together: the daily streak (correction happens lazily, next real activity,
 // not eagerly reconciled on every page load) and today's entry in
 // dailyActivityLog (powers the home page's weekly calendar, "points this
-// week", and "streak increased today").
-export async function recordActivity(userId, { pointsEarned = 0, completedTopic = false } = {}) {
+// week"/"streak increased today", and the Leaderboard's period windows).
+// quizFinished also bumps the lifetime counter the "All time" leaderboard
+// view reads (see models/User.js's lifetimeQuizzesFinished).
+export async function recordActivity(userId, { pointsEarned = 0, completedTopic = false, quizFinished = false } = {}) {
   const user = await User.findById(userId)
   const todayMs = utcMidnight(new Date())
+
+  if (quizFinished) {
+    user.lifetimeQuizzesFinished = (user.lifetimeQuizzesFinished || 0) + 1
+  }
 
   if (!user.lastActivityDate) {
     user.currentStreak = 1
@@ -45,11 +53,13 @@ export async function recordActivity(userId, { pointsEarned = 0, completedTopic 
   if (todayEntry) {
     todayEntry.pointsEarned += pointsEarned
     if (completedTopic) todayEntry.topicsCompleted += 1
+    if (quizFinished) todayEntry.quizzesFinished += 1
   } else {
     user.dailyActivityLog.push({
       date: new Date(todayMs),
       pointsEarned,
       topicsCompleted: completedTopic ? 1 : 0,
+      quizzesFinished: quizFinished ? 1 : 0,
     })
   }
   // Oldest entries first isn't guaranteed by push order alone once entries

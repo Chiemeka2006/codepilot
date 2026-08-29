@@ -2785,6 +2785,173 @@ body {
   width: 100%;
 }
 
+/* ---- Rankings (leaderboard) ---- */
+
+.stat-icon-quiz {
+  display: flex;
+  color: var(--text-accent);
+}
+
+/* A single rounded "housing" per group (metric, period) with individual
+   segments inside it — distinct from .filter-pill-row's separately-outlined
+   floating pills used elsewhere (Quiz collection's language filter etc). */
+.segmented-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-bottom: var(--sp-6);
+}
+.segmented-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.3rem;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+}
+.segmented-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-standard), background var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard);
+}
+.segmented-option svg {
+  width: 14px;
+  height: 14px;
+}
+.segmented-option:hover {
+  color: var(--text-strong);
+}
+.segmented-option.active {
+  background: var(--surface-accent-soft);
+  border-color: var(--border-accent);
+  color: var(--text-accent);
+}
+
+.leaderboard-table {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-radius: 0.9rem;
+  overflow: hidden;
+  box-shadow: var(--shadow-xs);
+}
+.leaderboard-row {
+  display: grid;
+  grid-template-columns: 2.5rem 1fr 5rem 5rem 4.5rem 6rem;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 1.1rem;
+  border-bottom: 1px solid var(--border-default);
+}
+.leaderboard-row:last-child {
+  border-bottom: none;
+}
+.leaderboard-row.leaderboard-head {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  background: var(--surface-raised);
+}
+.leaderboard-row.me {
+  background: var(--surface-accent-soft);
+  border-left: 3px solid var(--border-accent);
+}
+.leaderboard-rank {
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--text-strong);
+  text-align: center;
+}
+.leaderboard-learner {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+}
+.leaderboard-learner-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+.leaderboard-learner-name {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.leaderboard-you-pill {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: var(--surface-accent-soft);
+  color: var(--text-accent);
+  border: 1px solid var(--border-accent);
+}
+.leaderboard-learner-handle {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.leaderboard-col {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.rank-move {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  font-size: 12px;
+  font-weight: 700;
+}
+.rank-move svg {
+  width: 13px;
+  height: 13px;
+}
+.rank-move-up {
+  color: var(--fill-success);
+}
+.rank-move-down {
+  color: var(--fill-danger);
+}
+.rank-move-flat {
+  color: var(--text-muted);
+}
+@media (max-width: 700px) {
+  .leaderboard-row {
+    grid-template-columns: 2rem 1fr 3.5rem 5.5rem;
+  }
+  .leaderboard-streak,
+  .leaderboard-quizzes {
+    display: none;
+  }
+}
+
 /* ---- Quiz session (adaptive quiz-taking page) ---- */
 
 .quiz-band-pill,

@@ -95,4 +95,10 @@ export const icons = {
   menu: wrap(
     '<line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>'
   ),
+  trophy: wrap(
+    '<path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v5a5 5 0 0 1-10 0Z"/><path d="M7 5H4a2 2 0 0 0 2 4"/><path d="M17 5h3a2 2 0 0 1-2 4"/>'
+  ),
+  minus: wrap('<path d="M5 12h14"/>'),
+  arrowUp: wrap('<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>'),
+  arrowDown: wrap('<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>'),
 }

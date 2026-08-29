@@ -131,7 +131,7 @@ export async function submitAnswer(req, res) {
     progress.sessionQuestionsAnswered = 0
     progress.sessionRawPoints = 0
     progress.sessionPenaltyPercent = 0
-    await recordActivity(req.session.userId, { pointsEarned: bankedPoints })
+    await recordActivity(req.session.userId, { pointsEarned: bankedPoints, quizFinished: true })
     await checkAndAwardBadges(req.session.userId)
   }
 
