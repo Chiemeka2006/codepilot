@@ -101,4 +101,19 @@ export const icons = {
   minus: wrap('<path d="M5 12h14"/>'),
   arrowUp: wrap('<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>'),
   arrowDown: wrap('<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>'),
+  presentation: wrap(
+    '<path d="M2 3h20"/><path d="M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3"/><path d="m9 21 3-4 3 4"/>'
+  ),
+  video: wrap(
+    '<rect x="2" y="5" width="14" height="14" rx="2"/><path d="m16 10 6-4v12l-6-4"/>'
+  ),
+  badgeCheck: wrap(
+    '<path d="M12 2 4 6v6c0 5 3.5 8 8 10 4.5-2 8-5 8-10V6Z"/><path d="m9 12 2 2 4-4"/>'
+  ),
+  pencil: wrap(
+    '<path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>'
+  ),
+  phone: wrap(
+    '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.362 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0 1 22 16.92Z"/>'
+  ),
 }

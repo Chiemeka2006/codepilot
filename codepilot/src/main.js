@@ -24,11 +24,24 @@ import {
   deleteAccount,
   fetchHome,
   fetchLeaderboard,
+  fetchStudio,
+  createMaterial,
+  fetchOwnMaterial,
+  updateMaterial,
+  publishMaterial,
+  unpublishMaterial,
+  deleteMaterial,
+  fetchLibrary,
+  fetchLibraryMaterial,
+  sendPhoneOtp,
+  verifyPhoneOtp,
 } from './api.js'
-import { SUPPORTED_LANGUAGES } from '../shared/languages.js'
+import { SUPPORTED_LANGUAGES, LANGUAGE_NAMES } from '../shared/languages.js'
+import { MATERIAL_TYPES } from '../shared/materialTypes.js'
 import { icons } from './icons.js'
 import { initTheme, toggleTheme, currentTheme } from './theme.js'
 import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import { EditorView, basicSetup } from 'codemirror'
 import { EditorState } from '@codemirror/state'
 import { StreamLanguage, HighlightStyle, syntaxHighlighting } from '@codemirror/language'
@@ -52,7 +65,24 @@ initTheme()
 // tweaks like the password-visibility toggle, which mutate the DOM directly
 // so a full re-render doesn't wipe out whatever the user already typed).
 let user = null
+// A lecturer's own account stays a lecturer server-side the whole time —
+// this only changes what render()/renderAppShell() choose to show, so a
+// lecturer can click through the student experience (dashboard, courses,
+// quiz, playground) using their own account's data, without any real role
+// change or backend call. Resets to false on logout and on every fresh
+// login (never persisted), so a refresh mid-preview lands back on the
+// Lecturer Dashboard — matches this app's existing "in-memory-only UI
+// state resets are fine" convention (e.g. onboardingStep).
+let viewingAsStudent = false
 let authMode = 'login' // 'login' | 'register'
+let authRole = 'student' // 'student' | 'lecturer' — the auth page's segmented toggle
+// Set by the student register form's ID-card file input (read via
+// FileReader, not FormData — a File object isn't JSON-serializable, so this
+// holds the base64 data URI instead). Not reset on every render (re-renders
+// destroy/recreate the <input type="file"> anyway, which always shows empty
+// afterwards regardless — see renderRegisterForm's status line for how that
+// gets clarified to the user).
+let registerIdCardImageDataUri = ''
 let error = ''
 let notice = ''
 // Carries the just-registered credentials over to the login form so the
@@ -74,6 +104,17 @@ let onboardingStep = 1
 let onboardingAvatarChoice = 'bottts'
 let onboardingAvatarError = ''
 let onboardingAvatarSaving = false
+
+// Phone/OTP verification — a new step inserted BEFORE the avatar pick
+// (students only; see renderOnboardingPage()'s dispatcher, which gates on
+// the real, persisted `user.phoneVerified` rather than a step number, so a
+// student who already verified in a past session skips straight past this
+// on their next visit instead of being sent another OTP).
+let onboardingPhoneNumber = ''
+let onboardingPhoneOtpSent = false
+let onboardingPhoneOtp = ''
+let onboardingPhoneError = ''
+let onboardingPhoneSaving = false
 
 // Home page state
 let homePageData = null
@@ -156,6 +197,37 @@ let rankingsError = ''
 let rankingsMetric = 'points' // 'points' | 'streaks' | 'quizzes'
 let rankingsPeriod = 'week' // 'week' | 'month' | 'all'
 
+// ---- Lecturer Materials (Phase 11) state ----
+
+// Studio (lecturer home) state
+let studioData = null // { lecturerVerified, name, university, stats, materials } from GET /api/materials/studio
+let studioLoading = false
+let studioError = ''
+let studioFilter = 'all' // 'all' | 'published' | 'draft'
+
+// New/edit material form state
+let materialFormEditId = null // set when editing an existing material, null when creating
+let materialFormType = 'note'
+let materialFormTitle = ''
+let materialFormContent = ''
+let materialFormExternalUrl = ''
+let materialFormLanguage = 'General'
+let materialFormLoading = false // fetching an existing material to edit
+let materialFormSaving = false
+let materialFormError = ''
+
+// Browse library state (shared between students and lecturers)
+let libraryData = null // { materials } from GET /api/materials/library
+let libraryLoading = false
+let libraryError = ''
+let libraryTypeFilter = 'all'
+let libraryLanguageFilter = 'all'
+
+// Material detail view state
+let libraryMaterialData = null
+let libraryMaterialLoading = false
+let libraryMaterialError = ''
+
 // Toast notifications — a global stack (any page using renderAppShell can
 // trigger one), rendered bottom-right, auto-dismissing. Replaces the old
 // per-page inline green "notice-text" success messages (shop purchases,
@@ -235,6 +307,15 @@ function parseRoute() {
       return { name: 'quiz-session', language: decodeURIComponent(parts[1]), chapterSlug: parts[2], topicSlug: parts[3] }
     }
     return { name: 'quiz-collection' }
+  }
+  if (parts[0] === 'studio') {
+    if (parts[1] === 'new') return { name: 'studio-new' }
+    if (parts[1] === 'edit' && parts[2]) return { name: 'studio-edit', id: parts[2] }
+    return { name: 'studio' }
+  }
+  if (parts[0] === 'library') {
+    if (parts[1]) return { name: 'library-item', id: decodeURIComponent(parts[1]) }
+    return { name: 'library' }
   }
   return { name: 'home' }
 }
@@ -318,6 +399,61 @@ function goToRankingsPage() {
   render()
 }
 
+function goToStudio() {
+  closeMobileMenu()
+  window.history.pushState({}, '', '/studio')
+  render()
+}
+
+// Doesn't change the account's real role — only flips which shell/route
+// chain render()/renderAppShell() pick, so a lecturer can click through
+// the actual student experience (their own account's data — points,
+// streak, languages — same as any student would see for that account).
+function goToViewAsStudent() {
+  viewingAsStudent = true
+  closeMobileMenu()
+  window.history.pushState({}, '', '/')
+  render()
+}
+
+function goToViewAsLecturer() {
+  viewingAsStudent = false
+  closeMobileMenu()
+  window.history.pushState({}, '', '/studio')
+  render()
+}
+
+function goToNewMaterialPage() {
+  closeMobileMenu()
+  materialFormEditId = null
+  materialFormType = 'note'
+  materialFormTitle = ''
+  materialFormContent = ''
+  materialFormExternalUrl = ''
+  materialFormLanguage = 'General'
+  materialFormError = ''
+  window.history.pushState({}, '', '/studio/new')
+  render()
+}
+
+function goToEditMaterialPage(id) {
+  closeMobileMenu()
+  window.history.pushState({}, '', `/studio/edit/${id}`)
+  render()
+}
+
+function goToLibraryPage() {
+  closeMobileMenu()
+  window.history.pushState({}, '', '/library')
+  render()
+}
+
+function goToLibraryItem(id) {
+  closeMobileMenu()
+  window.history.pushState({}, '', `/library/${id}`)
+  render()
+}
+
 function goToQuizSession(language, chapterSlug, topicSlug) {
   currentCourseLanguage = null
   closeMobileMenu()
@@ -350,6 +486,15 @@ function render() {
     renderAuthPage()
   } else if (!user.hasCompletedOnboarding) {
     renderOnboardingPage()
+  } else if (user.role === 'lecturer' && !viewingAsStudent) {
+    const route = parseRoute()
+    if (route.name === 'studio-new') renderNewMaterialPage()
+    else if (route.name === 'studio-edit') renderNewMaterialPage(route.id)
+    else if (route.name === 'library') renderBrowseLibraryPage()
+    else if (route.name === 'library-item') renderMaterialDetailPage(route.id)
+    else if (route.name === 'playground') renderPlaygroundPage()
+    else if (route.name === 'profile') renderProfilePage()
+    else renderStudioPage()
   } else if (parseRoute().name === 'course') {
     renderCoursePage(parseRoute())
   } else if (parseRoute().name === 'playground') {
@@ -366,6 +511,10 @@ function render() {
     renderQuizCollectionPage()
   } else if (parseRoute().name === 'quiz-session') {
     renderQuizSessionPage(parseRoute())
+  } else if (parseRoute().name === 'library') {
+    renderBrowseLibraryPage()
+  } else if (parseRoute().name === 'library-item') {
+    renderMaterialDetailPage(parseRoute().id)
   } else {
     renderDashboardPage()
   }
@@ -522,40 +671,94 @@ function toggleChapter(lang, chapterSlug) {
   render()
 }
 
+function renderLecturerSidebarNav(routeName) {
+  return `
+    <nav class="sidebar-nav">
+      <button type="button" class="sidebar-nav-item ${
+        routeName === 'studio' ? 'active' : ''
+      }" id="nav-studio">${icons.home} Dashboard</button>
+      <button type="button" class="sidebar-nav-item ${
+        routeName === 'studio-new' || routeName === 'studio-edit' ? 'active' : ''
+      }" id="nav-new-material">${icons.plus} New material</button>
+      <button type="button" class="sidebar-nav-item ${
+        routeName === 'library' || routeName === 'library-item' ? 'active' : ''
+      }" id="nav-library">${icons.bookOpen} Browse library</button>
+      <button type="button" class="sidebar-nav-item" id="nav-view-as-student">${icons.eye} Student dashboard</button>
+      <button type="button" class="sidebar-nav-item ${
+        routeName === 'playground' ? 'active' : ''
+      }" id="nav-playground">${icons.terminal} Playground</button>
+    </nav>
+    <div class="sidebar-bottom-group">
+      <button type="button" class="sidebar-nav-item ${
+        routeName === 'profile' ? 'active' : ''
+      }" id="nav-profile">${icons.person} Profile</button>
+      <button type="button" class="sidebar-nav-item sidebar-logout" id="nav-logout">${icons.logout} Log out</button>
+      ${
+        user.university
+          ? `<div class="profile-card sidebar-lecturer-card"><p class="lang-meta">${escapeHtml(user.university)}</p></div>`
+          : ''
+      }
+    </div>
+  `
+}
+
+function renderStudentSidebarNav(routeName) {
+  return `
+    <nav class="sidebar-nav">
+      ${
+        user.role === 'lecturer'
+          ? `<button type="button" class="sidebar-nav-item" id="nav-view-as-lecturer">${icons.home} Lecturer dashboard</button>`
+          : ''
+      }
+      <button type="button" class="sidebar-nav-item ${
+        routeName === 'home' || routeName === 'languages' ? 'active' : ''
+      }" id="nav-home">${icons.home} Home</button>
+      <button type="button" class="sidebar-nav-item ${
+        routeName === 'quiz-collection' || routeName === 'quiz-session' ? 'active' : ''
+      }" id="nav-quiz">${icons.clipboardList} Quiz collection</button>
+      <button type="button" class="sidebar-nav-item ${
+        routeName === 'rankings' ? 'active' : ''
+      }" id="nav-rankings">${icons.trophy} Leaderboard</button>
+      <button type="button" class="sidebar-nav-item ${
+        routeName === 'library' || routeName === 'library-item' ? 'active' : ''
+      }" id="nav-library">${icons.bookOpen} Lecturer library</button>
+      <button type="button" class="sidebar-nav-item ${
+        routeName === 'playground' ? 'active' : ''
+      }" id="nav-playground">${icons.terminal} Playground</button>
+      <button type="button" class="sidebar-nav-item ${
+        routeName === 'cosmetics' ? 'active' : ''
+      }" id="nav-cosmetics">${icons.shoppingBag} Cosmetics</button>
+    </nav>
+    <div class="sidebar-section-label">My languages</div>
+    <div class="sidebar-tracks">${renderSidebarTracks()}</div>
+    <button type="button" class="sidebar-nav-item sidebar-add-lang" id="nav-add-language">${
+      icons.plus
+    } Add a language</button>
+    <button type="button" class="sidebar-nav-item ${
+      routeName === 'profile' ? 'active' : ''
+    }" id="nav-profile">${icons.person} Profile</button>
+    <button type="button" class="sidebar-nav-item sidebar-logout" id="nav-logout">${icons.logout} Log out</button>
+  `
+}
+
 function renderAppShell({ topLabel, mainHtml }) {
   const routeName = parseRoute().name
+  const isLecturer = user.role === 'lecturer' && !viewingAsStudent
+  const topbarExtra = isLecturer
+    ? `<span class="verified-pill ${user.lecturerVerified ? '' : 'unverified'}">${icons.badgeCheck} ${
+        user.lecturerVerified ? 'Verified lecturer' : 'Unverified'
+      }</span>`
+    : `
+      <span class="stat-pill"><span class="stat-icon-flame">${icons.flame}</span>${user.currentStreak}</span>
+      <span class="stat-pill"><span class="stat-icon-gem">${icons.gem}</span>${user.points.toLocaleString()}</span>
+    `
   return `
     <div class="app-shell">
       <div class="sidebar-overlay ${mobileMenuOpen ? 'overlay-open' : ''}" id="sidebar-overlay"></div>
       <aside class="app-sidebar ${mobileMenuOpen ? 'sidebar-open' : ''}">
         <button type="button" class="sidebar-close-btn" id="sidebar-close" title="Close menu">${icons.x}</button>
         <div class="brand-logo brand-logo-sm sidebar-logo">code<span>pilot</span></div>
-        <nav class="sidebar-nav">
-          <button type="button" class="sidebar-nav-item ${
-            routeName === 'home' || routeName === 'languages' ? 'active' : ''
-          }" id="nav-home">${icons.home} Home</button>
-          <button type="button" class="sidebar-nav-item ${
-            routeName === 'quiz-collection' || routeName === 'quiz-session' ? 'active' : ''
-          }" id="nav-quiz">${icons.clipboardList} Quiz collection</button>
-          <button type="button" class="sidebar-nav-item ${
-            routeName === 'rankings' ? 'active' : ''
-          }" id="nav-rankings">${icons.trophy} Rankings</button>
-          <button type="button" class="sidebar-nav-item ${
-            routeName === 'playground' ? 'active' : ''
-          }" id="nav-playground">${icons.terminal} Playground</button>
-          <button type="button" class="sidebar-nav-item ${
-            routeName === 'cosmetics' ? 'active' : ''
-          }" id="nav-cosmetics">${icons.shoppingBag} Cosmetics</button>
-        </nav>
-        <div class="sidebar-section-label">My tracks</div>
-        <div class="sidebar-tracks">${renderSidebarTracks()}</div>
-        <button type="button" class="sidebar-nav-item sidebar-add-lang" id="nav-add-language">${
-          icons.plus
-        } Add a language</button>
-        <button type="button" class="sidebar-nav-item ${
-          routeName === 'profile' ? 'active' : ''
-        }" id="nav-profile">${icons.person} Profile</button>
-        <button type="button" class="sidebar-nav-item sidebar-logout" id="nav-logout">${icons.logout} Log out</button>
+        ${isLecturer ? renderLecturerSidebarNav(routeName) : renderStudentSidebarNav(routeName)}
       </aside>
       <div class="app-main">
         <div class="app-topbar">
@@ -564,8 +767,7 @@ function renderAppShell({ topLabel, mainHtml }) {
           }</button>
           <span class="app-top-label">${topLabel}</span>
           <div style="display:flex; align-items:center; gap:0.6rem;">
-            <span class="stat-pill"><span class="stat-icon-flame">${icons.flame}</span>${user.currentStreak}</span>
-            <span class="stat-pill"><span class="stat-icon-gem">${icons.gem}</span>${user.points.toLocaleString()}</span>
+            ${topbarExtra}
             ${themeToggleButton()}
             <button type="button" class="btn btn-primary btn-sm topbar-try-btn" id="try-it-yourself">${
               icons.terminal
@@ -590,27 +792,39 @@ function bindAppShell() {
   if (sidebarClose) sidebarClose.addEventListener('click', closeMobileMenu)
   const sidebarOverlay = document.querySelector('#sidebar-overlay')
   if (sidebarOverlay) sidebarOverlay.addEventListener('click', closeMobileMenu)
-  document.querySelector('#nav-home').addEventListener('click', goToDashboard)
   document.querySelector('#nav-playground').addEventListener('click', goToPlayground)
-  document.querySelector('#nav-add-language').addEventListener('click', goToLanguagesPage)
-  document.querySelector('#nav-quiz').addEventListener('click', goToQuizCollection)
-  document.querySelector('#nav-rankings').addEventListener('click', goToRankingsPage)
-  document.querySelector('#nav-cosmetics').addEventListener('click', goToCosmeticsPage)
   document.querySelector('#nav-profile').addEventListener('click', goToProfilePage)
   document.querySelector('#nav-logout').addEventListener('click', handleLogout)
   document.querySelector('#try-it-yourself').addEventListener('click', toggleMiniPlayground)
-  document.querySelectorAll('.sidebar-track-header').forEach((btn) => {
-    btn.addEventListener('click', () => toggleTrack(btn.dataset.lang))
-  })
-  document.querySelectorAll('.sidebar-chapter-header').forEach((btn) => {
-    btn.addEventListener('click', () => toggleChapter(btn.dataset.lang, btn.dataset.chapter))
-  })
-  document.querySelectorAll('.sidebar-topic').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      closeMobileMenu()
-      openTopic(btn.dataset.lang, btn.dataset.chapter, btn.dataset.topic)
+
+  if (user.role === 'lecturer' && !viewingAsStudent) {
+    document.querySelector('#nav-studio').addEventListener('click', goToStudio)
+    document.querySelector('#nav-new-material').addEventListener('click', goToNewMaterialPage)
+    document.querySelector('#nav-library').addEventListener('click', goToLibraryPage)
+    document.querySelector('#nav-view-as-student').addEventListener('click', goToViewAsStudent)
+  } else {
+    document.querySelector('#nav-home').addEventListener('click', goToDashboard)
+    document.querySelector('#nav-add-language').addEventListener('click', goToLanguagesPage)
+    document.querySelector('#nav-quiz').addEventListener('click', goToQuizCollection)
+    document.querySelector('#nav-rankings').addEventListener('click', goToRankingsPage)
+    document.querySelector('#nav-library').addEventListener('click', goToLibraryPage)
+    document.querySelector('#nav-cosmetics').addEventListener('click', goToCosmeticsPage)
+    const viewAsLecturerBtn = document.querySelector('#nav-view-as-lecturer')
+    if (viewAsLecturerBtn) viewAsLecturerBtn.addEventListener('click', goToViewAsLecturer)
+    document.querySelectorAll('.sidebar-track-header').forEach((btn) => {
+      btn.addEventListener('click', () => toggleTrack(btn.dataset.lang))
     })
-  })
+    document.querySelectorAll('.sidebar-chapter-header').forEach((btn) => {
+      btn.addEventListener('click', () => toggleChapter(btn.dataset.lang, btn.dataset.chapter))
+    })
+    document.querySelectorAll('.sidebar-topic').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        closeMobileMenu()
+        openTopic(btn.dataset.lang, btn.dataset.chapter, btn.dataset.topic)
+      })
+    })
+  }
+
   if (miniPlaygroundOpen) {
     bindMiniPlayground()
     mountMiniPlaygroundEditor()
@@ -625,8 +839,8 @@ function renderBrandPanel() {
     <div class="brand-panel">
       <div class="brand-logo">code<span>pilot</span></div>
       <div>
-        <h1 class="brand-headline">Learn to code<br />between lectures.</h1>
-        <p class="brand-subtext">Short chapters, real exercises in the browser, and an explanation every time you get one wrong.</p>
+        <h1 class="brand-headline">Learn to code<br />without stress.</h1>
+        <p class="brand-subtext">You don't have to sit through a 3 hour crash course just to write three lines of code. The chapters are short, there are key takeaways for each topic, and getting something wrong in the quiz actually tells you why.</p>
         <div class="code-card">
           <div class="code-card-tab">${icons.file} day-01.js</div>
           <div class="code-card-body">
@@ -636,8 +850,7 @@ function renderBrandPanel() {
         </div>
       </div>
       <div class="brand-footer">
-        <span class="badge">${icons.graduationCap} 18,400 students</span>
-        <span class="brand-footer-note">Free for university accounts</span>
+        <span class="brand-footer-note">Free for Baze University students</span>
       </div>
     </div>
   `
@@ -651,6 +864,14 @@ function renderAuthPage() {
       ${renderBrandPanel()}
       <div class="form-panel">
         <div class="form-topbar">
+          <div class="segmented-control auth-role-toggle" role="tablist">
+            <button type="button" class="segmented-option ${
+              authRole === 'student' ? 'active' : ''
+            }" data-auth-role="student">Student</button>
+            <button type="button" class="segmented-option ${
+              authRole === 'lecturer' ? 'active' : ''
+            }" data-auth-role="lecturer">Lecturer</button>
+          </div>
           <a href="#" id="topbar-auth-link" class="pill-link"><span class="pill-dot"></span> ${
             authMode === 'login' ? 'Register' : 'Log in'
           }</a>
@@ -660,9 +881,17 @@ function renderAuthPage() {
           ${authMode === 'login' ? renderLoginForm() : renderRegisterForm()}
         </div>
       </div>
+      ${renderToasts()}
     </div>
   `
   bindThemeToggle()
+  document.querySelectorAll('[data-auth-role]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      authRole = btn.dataset.authRole
+      error = ''
+      render()
+    })
+  })
   document.querySelector('#topbar-auth-link').addEventListener('click', (e) => {
     e.preventDefault()
     switchAuthMode()
@@ -690,6 +919,38 @@ function renderAuthPage() {
       render()
     })
   }
+  const idCardInput = document.querySelector('#reg-id-card')
+  if (idCardInput) {
+    // Mutates the status line directly rather than calling render() — same
+    // reasoning as the password-visibility toggle above: a full re-render
+    // would wipe whatever else the user has already typed into this form.
+    // (The file input itself always shows empty after any re-render
+    // regardless — browsers won't let JS restore a file input's selection —
+    // which is exactly why this status line exists: it's the only way the
+    // user can tell an image is still attached after, say, switching the
+    // password visibility toggle triggers no re-render, but switching the
+    // Student/Lecturer tab would.)
+    idCardInput.addEventListener('change', () => {
+      const file = idCardInput.files[0]
+      const statusEl = document.querySelector('#id-card-status')
+      registerIdCardImageDataUri = ''
+      if (!file) {
+        if (statusEl) statusEl.textContent = ''
+        return
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        if (statusEl) statusEl.textContent = 'Image is too large — please choose a photo under 5MB.'
+        idCardInput.value = ''
+        return
+      }
+      const reader = new FileReader()
+      reader.onload = () => {
+        registerIdCardImageDataUri = reader.result
+        if (statusEl) statusEl.textContent = 'Image selected.'
+      }
+      reader.readAsDataURL(file)
+    })
+  }
   document.querySelectorAll('.toggle-password-visibility').forEach((passwordToggle) => {
     passwordToggle.addEventListener('click', () => {
       const input = passwordToggle.previousElementSibling
@@ -697,6 +958,9 @@ function renderAuthPage() {
       input.type = showing ? 'password' : 'text'
       passwordToggle.innerHTML = showing ? icons.eye : icons.eyeOff
     })
+  })
+  document.querySelectorAll('[data-toast-close]').forEach((btn) => {
+    btn.addEventListener('click', () => dismissToast(btn.dataset.toastClose))
   })
 }
 
@@ -717,7 +981,8 @@ function renderLoginForm() {
   prefillLoginPassword = ''
   return `
     <h1 class="form-title">Welcome back</h1>
-    <p class="form-subtext">Good to see you again — let's keep the streak going.</p>
+    <p class="form-subtext">Log in so you don't lose your streak.</p>
+    <p class="form-tagline">Every topic finished is one less thing standing between you and actually being good at this.</p>
     <form id="auth-form" class="form-fields">
       <div>
         <label class="field-label" for="email">Email</label>
@@ -767,12 +1032,18 @@ function renderRegisterForm() {
         </div>
       </div>
       <div>
-        <label class="field-label" for="reg-email">University email</label>
+        <label class="field-label" for="reg-email">${authRole === 'lecturer' ? 'University email' : 'Baze University email'}</label>
         <div class="input-wrap">
           <span class="input-icon">${icons.envelope}</span>
-          <input id="reg-email" name="email" type="email" placeholder="you@uni.edu" required class="input input-with-icon" />
+          <input id="reg-email" name="email" type="email" placeholder="${
+            authRole === 'lecturer' ? 'you@uni.edu' : 'you@bazeuniversity.edu.ng'
+          }" required class="input input-with-icon" />
         </div>
-        <p class="helper-text">We use this to verify your student status.</p>
+        <p class="helper-text">${
+          authRole === 'lecturer'
+            ? 'We use this to verify your student status.'
+            : 'Must end in @bazeuniversity.edu.ng — this is Baze University students only for now.'
+        }</p>
       </div>
       <div>
         <label class="field-label" for="reg-password">Password</label>
@@ -781,6 +1052,34 @@ function renderRegisterForm() {
           <button type="button" class="input-icon-right toggle-password-visibility">${icons.eye}</button>
         </div>
       </div>
+      ${
+        authRole === 'lecturer'
+          ? `
+        <div>
+          <label class="field-label" for="reg-university">University / institution</label>
+          <div class="input-wrap">
+            <span class="input-icon">${icons.graduationCap}</span>
+            <input id="reg-university" name="university" type="text" placeholder="Baze University" required class="input input-with-icon" />
+          </div>
+        </div>
+        <div>
+          <label class="field-label" for="reg-courses">Courses you teach</label>
+          <input id="reg-courses" name="coursesTaught" type="text" placeholder="CSC301, CSC420" required class="input" />
+          <p class="helper-text">Used only to verify your lecturer account — sent to the CodePilot team, never shown publicly.</p>
+        </div>
+      `
+          : `
+        <div>
+          <label class="field-label" for="reg-id-card">Student ID card photo</label>
+          <input id="reg-id-card" type="file" accept="image/*" required class="input" />
+          <p class="helper-text" id="id-card-status">${registerIdCardImageDataUri ? 'Image selected.' : ''}</p>
+        </div>
+        <div>
+          <label class="field-label" for="reg-id-expiry">ID card expiration (month/year)</label>
+          <input id="reg-id-expiry" name="idCardExpirationDate" type="month" required class="input" />
+        </div>
+      `
+      }
       <label class="checkbox-row">
         <input type="checkbox" name="agree" required />
         I agree to the terms and privacy notice
@@ -797,7 +1096,13 @@ function renderRegisterForm() {
 
 async function handleAuthSubmit(e) {
   e.preventDefault()
-  const payload = Object.fromEntries(new FormData(e.target))
+  const payload = { ...Object.fromEntries(new FormData(e.target)), role: authRole }
+  // The file input deliberately has no `name` attribute (see its change
+  // handler above), so FormData never picks it up — it's added here as the
+  // base64 string FileReader already produced.
+  if (authMode === 'register' && authRole === 'student') {
+    payload.idCardImage = registerIdCardImageDataUri
+  }
 
   try {
     if (authMode === 'register') {
@@ -805,6 +1110,7 @@ async function handleAuthSubmit(e) {
       authMode = 'login'
       prefillLoginEmail = payload.email
       prefillLoginPassword = payload.password
+      registerIdCardImageDataUri = ''
       error = ''
       notice = 'Account created — log in below.'
     } else {
@@ -814,7 +1120,15 @@ async function handleAuthSubmit(e) {
       notice = ''
     }
   } catch (err) {
-    error = err.message
+    // The "not a Baze University student" registration error gets a toast
+    // (matching how e.g. an avatar-equip confirmation shows) instead of the
+    // usual inline error text — everything else stays inline as before.
+    if (err.code === 'invalid_domain') {
+      showErrorToast(err.message)
+      error = ''
+    } else {
+      error = err.message
+    }
     notice = ''
   }
   render()
@@ -861,11 +1175,128 @@ function topicsUnlocked() {
 // Onboarding is 2 steps — step 1 (new) picks a free starter avatar, step 2
 // is languages + daily goal (the whole page this used to be, single-step).
 function renderOnboardingPage() {
-  if (onboardingStep === 1) {
+  // Gated on the real, persisted phoneVerified flag (not a step counter) —
+  // a refresh mid-onboarding still restarts the avatar/language steps from
+  // scratch (harmless, see their own comments), but must NOT re-send an
+  // OTP to someone who already verified, since each send costs real money.
+  if (!user.phoneVerified) {
+    renderOnboardingPhoneStep()
+  } else if (onboardingStep === 1) {
     renderOnboardingAvatarStep()
   } else {
     renderOnboardingLanguagesStep()
   }
+}
+
+function renderOnboardingPhoneStep() {
+  app.innerHTML = `
+    <div class="onboarding-page">
+      <div class="onboarding-topbar">
+        <div class="onboarding-topbar-left">
+          <div class="brand-logo brand-logo-sm">code<span>pilot</span></div>
+          <span class="setup-chip">&bull; First-time setup</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:0.6rem;">
+          ${themeToggleButton()}
+          ${renderAvatar(user)}
+        </div>
+      </div>
+      <div class="onboarding-body">
+        <span class="setup-chip setup-chip-mobile">&bull; First-time setup</span>
+        <p class="eyebrow">WELCOME, ${user.name.toUpperCase()} &middot; STEP 1 OF 3</p>
+        <h1 class="onboarding-heading">Verify your phone number.</h1>
+        <p class="onboarding-subtext">We text a 4-digit code to confirm you're a real Baze University student before you can start.</p>
+
+        <div class="progress-row">
+          <span>Setting up your account</span>
+          <span>Step 1 of 3</span>
+        </div>
+        <div class="progress-track"><div class="progress-fill" style="width:33%"></div></div>
+
+        <div class="form-card" style="max-width:420px; margin-top:1.5rem;">
+          <div>
+            <label class="field-label" for="onboarding-phone-number">Phone number</label>
+            <div class="input-wrap">
+              <span class="input-icon">${icons.phone}</span>
+              <input id="onboarding-phone-number" type="tel" placeholder="08012345678" class="input input-with-icon" value="${escapeHtml(
+                onboardingPhoneNumber
+              )}" ${onboardingPhoneOtpSent ? 'disabled' : ''} />
+            </div>
+          </div>
+          ${
+            onboardingPhoneOtpSent
+              ? `
+            <div style="margin-top:1rem;">
+              <label class="field-label" for="onboarding-phone-otp">4-digit code</label>
+              <input id="onboarding-phone-otp" type="text" inputmode="numeric" maxlength="4" placeholder="1234" class="input" value="${escapeHtml(
+                onboardingPhoneOtp
+              )}" />
+              <p class="helper-text">Sent to ${escapeHtml(onboardingPhoneNumber)}.</p>
+            </div>
+            <div style="display:flex; gap:0.6rem; margin-top:1.25rem; flex-wrap:wrap;">
+              <button type="button" id="onboarding-phone-verify" class="btn btn-primary" ${
+                onboardingPhoneSaving ? 'disabled' : ''
+              }>Verify ${icons.arrowRight}</button>
+              <button type="button" id="onboarding-phone-resend" class="btn btn-secondary" ${
+                onboardingPhoneSaving ? 'disabled' : ''
+              }>Resend code</button>
+            </div>
+          `
+              : `
+            <div style="margin-top:1.25rem;">
+              <button type="button" id="onboarding-phone-send" class="btn btn-primary" ${
+                onboardingPhoneSaving ? 'disabled' : ''
+              }>Send code ${icons.arrowRight}</button>
+            </div>
+          `
+          }
+          ${onboardingPhoneError ? `<p class="error-text" style="margin-top:0.75rem;">${escapeHtml(onboardingPhoneError)}</p>` : ''}
+        </div>
+      </div>
+    </div>
+  `
+  bindThemeToggle()
+  const sendBtn = document.querySelector('#onboarding-phone-send')
+  if (sendBtn) sendBtn.addEventListener('click', handleSendPhoneOtp)
+  const verifyBtn = document.querySelector('#onboarding-phone-verify')
+  if (verifyBtn) verifyBtn.addEventListener('click', handleVerifyPhoneOtp)
+  const resendBtn = document.querySelector('#onboarding-phone-resend')
+  if (resendBtn) resendBtn.addEventListener('click', handleSendPhoneOtp)
+  const numberInput = document.querySelector('#onboarding-phone-number')
+  if (numberInput) numberInput.addEventListener('input', (e) => { onboardingPhoneNumber = e.target.value })
+  const otpInput = document.querySelector('#onboarding-phone-otp')
+  if (otpInput) otpInput.addEventListener('input', (e) => { onboardingPhoneOtp = e.target.value })
+}
+
+async function handleSendPhoneOtp() {
+  onboardingPhoneError = ''
+  onboardingPhoneSaving = true
+  render()
+  try {
+    await sendPhoneOtp(onboardingPhoneNumber)
+    onboardingPhoneOtpSent = true
+    onboardingPhoneOtp = ''
+  } catch (err) {
+    onboardingPhoneError = err.message
+  }
+  onboardingPhoneSaving = false
+  render()
+}
+
+async function handleVerifyPhoneOtp() {
+  onboardingPhoneError = ''
+  onboardingPhoneSaving = true
+  render()
+  try {
+    const { user: updatedUser } = await verifyPhoneOtp(onboardingPhoneOtp)
+    setUser(updatedUser)
+    // render() below now skips straight past this step since
+    // user.phoneVerified is true — no explicit step-advance needed here.
+  } catch (err) {
+    onboardingPhoneError = err.message
+  }
+  onboardingPhoneSaving = false
+  render()
 }
 
 // A small fixed set (not the full random AVATAR_STYLES pool) with a fixed
@@ -911,15 +1342,15 @@ function renderOnboardingAvatarStep() {
       </div>
       <div class="onboarding-body">
         <span class="setup-chip setup-chip-mobile">&bull; First-time setup</span>
-        <p class="eyebrow">WELCOME, ${user.name.toUpperCase()} &middot; STEP 1 OF 2</p>
+        <p class="eyebrow">WELCOME, ${user.name.toUpperCase()} &middot; STEP 2 OF 3</p>
         <h1 class="onboarding-heading">Pick your avatar.</h1>
         <p class="onboarding-subtext">This is how you show up on leaderboards. Three to start with — you can change it, and unlock more, from your profile.</p>
 
         <div class="progress-row">
           <span>Setting up your account</span>
-          <span>Step 1 of 2</span>
+          <span>Step 2 of 3</span>
         </div>
-        <div class="progress-track"><div class="progress-fill" style="width:50%"></div></div>
+        <div class="progress-track"><div class="progress-fill" style="width:66%"></div></div>
 
         <div class="onboarding-avatar-grid">${cardsHtml}</div>
 
@@ -988,13 +1419,13 @@ function renderOnboardingLanguagesStep() {
       </div>
       <div class="onboarding-body">
         <span class="setup-chip setup-chip-mobile">&bull; First-time setup</span>
-        <p class="eyebrow">WELCOME, ${user.name.toUpperCase()} &middot; STEP 2 OF 2</p>
+        <p class="eyebrow">WELCOME, ${user.name.toUpperCase()} &middot; STEP 3 OF 3</p>
         <h1 class="onboarding-heading">What do you want to learn?</h1>
         <p class="onboarding-subtext">Pick as many languages as you like — each one adds its chapters and topics to your sidebar. You can add or drop a language any time from your settings.</p>
 
         <div class="progress-row">
           <span>Setting up your account</span>
-          <span>Step 2 of 2</span>
+          <span>Step 3 of 3</span>
         </div>
         <div class="progress-track"><div class="progress-fill" style="width:100%"></div></div>
 
@@ -1002,7 +1433,7 @@ function renderOnboardingLanguagesStep() {
 
         <div class="goal-card">
           <p class="goal-title">How hard do you want to push?</p>
-          <p class="goal-subtext">This only sets your daily goal — nothing is locked either way</p>
+          <p class="goal-subtext">This just sets your daily goal. You can change it whenever.</p>
           <div class="goal-options">
             ${renderGoalOption('chill', 'Chill', '1 topic a day')}
             ${renderGoalOption('steady', 'Steady', '2 topics a day')}
@@ -1145,20 +1576,15 @@ function renderDashboardPage() {
     points,
     pointsThisWeek,
     topicsCompletedTotal,
-    topicsLeftToday,
     weekActivity,
     daysPractisedThisWeek,
-    streakFreezeCount,
     lastViewedTopic,
     tracks,
     quizSummary,
   } = homePageData
 
   const firstName = user.name.split(' ')[0]
-  const goalSubtext =
-    topicsLeftToday === 0
-      ? "Today's goal is done — nice work."
-      : `${topicsLeftToday} topic${topicsLeftToday === 1 ? '' : 's'} left to hit today's goal.`
+  const goalSubtext = 'Make sure you work hard to get on the leaderboard.'
 
   const matchingTrack = lastViewedTopic ? tracks.find((t) => t.language === lastViewedTopic.language) : null
   const continueCta = lastViewedTopic
@@ -1202,7 +1628,7 @@ function renderDashboardPage() {
       <div class="profile-card home-resume-card">
         <p class="lang-name">Pick up where you left off</p>
         <p class="lang-meta" style="margin-bottom:1rem;">You haven't opened a lesson yet.</p>
-        <button type="button" class="btn btn-primary btn-sm" id="home-browse-tracks">Browse your tracks ${
+        <button type="button" class="btn btn-primary btn-sm" id="home-browse-tracks">Browse your languages ${
           icons.arrowRight
         }</button>
       </div>
@@ -1273,12 +1699,12 @@ function renderDashboardPage() {
         <p class="lang-name">This week</p>
         <p class="lang-meta" style="margin-bottom:1rem;">${daysPractisedThisWeek} of 7 days practised</p>
         <div class="home-week-row">${weekCalendarHtml}</div>
-        <p class="lang-meta" style="margin-top:1rem;">Miss a day and a freeze covers you — you have ${streakFreezeCount}.</p>
+        <p class="lang-meta" style="margin-top:1rem;">Don't worry if you miss a day, a streak freeze can help you.</p>
       </div>
     </div>
 
     <div class="languages-section-header">
-      <h2 class="goal-title" style="margin-bottom:0;">My tracks</h2>
+      <h2 class="goal-title" style="margin-bottom:0;">My languages</h2>
       <div class="filter-pill-row">
         <button type="button" class="filter-pill ${trackFilter === 'all' ? 'active' : ''}" data-track-filter="all">All</button>
         <button type="button" class="filter-pill ${
@@ -1292,7 +1718,7 @@ function renderDashboardPage() {
     <div class="lang-grid">
       ${
         filteredTracks.map(renderHomeTrackTile).join('') ||
-        '<p class="playground-output-placeholder">No tracks match this filter.</p>'
+        '<p class="playground-output-placeholder">No languages match this filter.</p>'
       }
     </div>
 
@@ -1311,8 +1737,8 @@ function renderDashboardPage() {
       </div>
       <div class="profile-card">
         <p class="lang-name">Playground</p>
-        <p class="lang-meta" style="margin-bottom:1rem;">Scratch file, no topic attached.</p>
-        <p class="lang-meta" style="margin-bottom:1rem;">Test an idea, paste code from a lecture, or redo an exercise without losing your progress.</p>
+        <p class="lang-meta" style="margin-bottom:1rem;">Only lets you code in the languages you've added to your sidebar.</p>
+        <p class="lang-meta" style="margin-bottom:1rem;">Good for practicing code without having to leave the website and go elsewhere to code.</p>
         <button type="button" class="btn btn-secondary btn-sm" id="home-open-editor">${
           icons.terminal
         } Open editor</button>
@@ -1413,7 +1839,7 @@ function renderLanguagesPage() {
       <div>
         <p class="eyebrow">YOUR LEARNING</p>
         <h1 class="onboarding-heading" style="margin-bottom:0.5rem;">Languages you're learning</h1>
-        <p class="onboarding-subtext" style="max-width:60ch; margin-bottom:0;">Each language you keep adds its chapters and topics to your sidebar. Drop one and its progress is kept — it just stops showing up.</p>
+        <p class="onboarding-subtext" style="max-width:60ch; margin-bottom:0;">Add a language and it shows up in your sidebar, chapters and all. Remove one and nothing gets deleted — it just stops showing until you bring it back.</p>
       </div>
       <div class="input-wrap languages-search-wrap">
         <span class="input-icon">${icons.search}</span>
@@ -1452,7 +1878,7 @@ function renderLanguagesPage() {
 
     <div class="goal-card" style="margin-bottom: 6rem;">
       <p class="goal-title">Daily goal</p>
-      <p class="goal-subtext">Changes how much you need to do to keep a streak — nothing is locked either way</p>
+      <p class="goal-subtext">Sets how many topics keep your streak alive. Switch it any time.</p>
       <div class="goal-options">
         ${renderGoalOption('chill', 'Chill', '1 topic a day')}
         ${renderGoalOption('steady', 'Steady', '2 topics a day')}
@@ -1611,7 +2037,7 @@ function renderQuizCollectionPage() {
       <div>
         <p class="eyebrow">QUIZ COLLECTION</p>
         <h1 class="onboarding-heading" style="margin-bottom:0.5rem;">Test what stuck.</h1>
-        <p class="onboarding-subtext" style="max-width:60ch; margin-bottom:0;">Practice adapts to you — questions get harder as you get things right, and easier if you don't. Points bank once every 10 questions.</p>
+        <p class="onboarding-subtext" style="max-width:60ch; margin-bottom:0;">Question difficulty increases when you're doing well, and decreases when you're not. Points are only stored once you've answered all 10 questions in the quiz.</p>
       </div>
       <div class="input-wrap languages-search-wrap">
         <span class="input-icon">${icons.search}</span>
@@ -1660,6 +2086,482 @@ function renderQuizCollectionPage() {
   })
 }
 
+// ---- Lecturer Materials (Phase 11) ----
+
+function materialTypeMeta(type) {
+  return MATERIAL_TYPES.find((t) => t.value === type) || MATERIAL_TYPES[0]
+}
+
+function relativeTimeFromNow(dateStr) {
+  const diffMs = Date.now() - new Date(dateStr).getTime()
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))
+  if (diffDays <= 0) return 'today'
+  if (diffDays === 1) return 'yesterday'
+  if (diffDays < 7) return `${diffDays} days ago`
+  const diffWeeks = Math.floor(diffDays / 7)
+  if (diffWeeks < 5) return `${diffWeeks} week${diffWeeks === 1 ? '' : 's'} ago`
+  return new Date(dateStr).toLocaleDateString()
+}
+
+function studioDataReady() {
+  return studioData !== null
+}
+
+async function loadStudioData() {
+  studioLoading = true
+  studioError = ''
+  try {
+    studioData = await fetchStudio()
+  } catch (err) {
+    studioError = err.message
+    studioData = { lecturerVerified: false, name: user.name, university: user.university, stats: { publishedCount: 0, draftCount: 0 }, materials: [] }
+  }
+  studioLoading = false
+  render()
+}
+
+function renderStudioPage() {
+  if (!studioDataReady()) {
+    app.innerHTML = renderAppShell({ topLabel: 'Studio', mainHtml: '<p>Loading…</p>' })
+    bindAppShell()
+    if (!studioLoading) loadStudioData()
+    return
+  }
+
+  const { stats, materials } = studioData
+
+  const summarySentence = `${stats.publishedCount} published material${
+    stats.publishedCount === 1 ? '' : 's'
+  }. ${stats.draftCount} draft${stats.draftCount === 1 ? ' is' : 's are'} still unpublished.`
+
+  const filteredMaterials =
+    studioFilter === 'all' ? materials : materials.filter((m) => m.status === studioFilter)
+
+  const materialsHtml = filteredMaterials
+    .map((m) => {
+      const typeMeta = materialTypeMeta(m.type)
+      return `
+        <div class="profile-card material-row">
+          <span class="material-type-icon">${icons[typeMeta.iconKey] || icons.file}</span>
+          <div style="flex:1; min-width:0;">
+            <p class="lang-name" style="margin-bottom:0.15rem;">${escapeHtml(m.title)}</p>
+            <p class="lang-meta">${typeMeta.label} &middot; ${relativeTimeFromNow(m.updatedAt)}</p>
+          </div>
+          ${m.status === 'draft' ? '<span class="material-draft-badge">Draft</span>' : ''}
+          <button type="button" class="icon-btn material-edit-btn" data-material-edit="${m.id}" title="Edit">${icons.pencil}</button>
+          ${
+            m.status === 'published'
+              ? `<button type="button" class="icon-btn material-edit-btn" data-material-unpublish="${m.id}" title="Unpublish">${icons.eyeOff}</button>`
+              : ''
+          }
+          <button type="button" class="icon-btn material-edit-btn" data-material-delete="${m.id}" title="Delete">${icons.x}</button>
+        </div>
+      `
+    })
+    .join('')
+
+  const mainHtml = `
+    <div class="languages-page-header">
+      <div>
+        <p class="eyebrow">LECTURER STUDIO</p>
+        <h1 class="onboarding-heading" style="margin-bottom:0.5rem;">Good ${getGreetingWord().toLowerCase()}, ${escapeHtml(
+          user.name
+        )}.</h1>
+        <p class="onboarding-subtext" style="max-width:65ch; margin-bottom:0;">${summarySentence}</p>
+      </div>
+      <button type="button" class="btn btn-primary btn-sm" id="studio-new-material">${icons.plus} New material</button>
+    </div>
+
+    ${studioError ? `<p class="error-text">${escapeHtml(studioError)}</p>` : ''}
+
+    <div class="profile-stat-row" style="margin-bottom: var(--sp-6);">
+      <div class="profile-stat-tile">
+        <div class="profile-stat-top-row">
+          <span class="stat-icon-topics">${icons.checkCircle}</span>
+          <span class="profile-stat-number">${stats.publishedCount}</span>
+        </div>
+        <p class="lang-meta">published materials</p>
+      </div>
+      <div class="profile-stat-tile">
+        <div class="profile-stat-top-row">
+          <span class="stat-icon-draft">${icons.clock}</span>
+          <span class="profile-stat-number">${stats.draftCount}</span>
+        </div>
+        <p class="lang-meta">drafts unpublished</p>
+      </div>
+    </div>
+
+    <div class="languages-section-header">
+      <h2 class="goal-title" style="margin-bottom:0;">Your materials</h2>
+      <div class="filter-pill-row">
+        <button type="button" class="filter-pill ${studioFilter === 'all' ? 'active' : ''}" data-studio-filter="all">All ${materials.length}</button>
+        <button type="button" class="filter-pill ${studioFilter === 'published' ? 'active' : ''}" data-studio-filter="published">Published ${stats.publishedCount}</button>
+        <button type="button" class="filter-pill ${studioFilter === 'draft' ? 'active' : ''}" data-studio-filter="draft">Drafts ${stats.draftCount}</button>
+      </div>
+    </div>
+    <div class="material-row-list">
+      ${materialsHtml || '<p class="playground-output-placeholder">No materials yet — create your first one.</p>'}
+    </div>
+
+    <div class="profile-card" style="margin-top: var(--sp-6);">
+      <p class="lang-name" style="margin-bottom:0.15rem;">Posting as ${escapeHtml(user.name)}</p>
+      <p class="lang-meta">${escapeHtml(user.university || 'No institution on file')}. Your name and institution appear on everything you post.</p>
+    </div>
+  `
+
+  app.innerHTML = renderAppShell({ topLabel: 'Studio', mainHtml })
+  bindAppShell()
+
+  document.querySelector('#studio-new-material').addEventListener('click', goToNewMaterialPage)
+  document.querySelectorAll('[data-studio-filter]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      studioFilter = btn.dataset.studioFilter
+      render()
+    })
+  })
+  document.querySelectorAll('[data-material-edit]').forEach((btn) => {
+    btn.addEventListener('click', () => goToEditMaterialPage(btn.dataset.materialEdit))
+  })
+  document.querySelectorAll('[data-material-unpublish]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      try {
+        await unpublishMaterial(btn.dataset.materialUnpublish)
+        studioData = null
+        showToast('Material unpublished.')
+        render()
+      } catch (err) {
+        showErrorToast(err.message)
+      }
+    })
+  })
+  document.querySelectorAll('[data-material-delete]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (!window.confirm('Delete this material? This cannot be undone.')) return
+      try {
+        await deleteMaterial(btn.dataset.materialDelete)
+        studioData = null
+        showToast('Material deleted.')
+        render()
+      } catch (err) {
+        showErrorToast(err.message)
+      }
+    })
+  })
+}
+
+async function loadMaterialForEdit(id) {
+  materialFormLoading = true
+  materialFormError = ''
+  try {
+    const { material } = await fetchOwnMaterial(id)
+    materialFormEditId = material._id
+    materialFormType = material.type
+    materialFormTitle = material.title
+    materialFormContent = material.content || ''
+    materialFormExternalUrl = material.externalUrl || ''
+    materialFormLanguage = material.language
+  } catch (err) {
+    materialFormError = err.message
+  }
+  materialFormLoading = false
+  render()
+}
+
+function renderNewMaterialPage(editId = null) {
+  if (editId && materialFormEditId !== editId && !materialFormLoading) {
+    loadMaterialForEdit(editId)
+  }
+  if (editId && (materialFormLoading || materialFormEditId !== editId)) {
+    app.innerHTML = renderAppShell({ topLabel: 'Edit material', mainHtml: '<p>Loading…</p>' })
+    bindAppShell()
+    return
+  }
+
+  const typeMeta = materialTypeMeta(materialFormType)
+  const languageOptions = ['General', ...LANGUAGE_NAMES]
+    .map((lang) => `<option value="${lang}" ${materialFormLanguage === lang ? 'selected' : ''}>${lang}</option>`)
+    .join('')
+
+  const typePillsHtml = MATERIAL_TYPES.map(
+    (t) => `
+      <button type="button" class="filter-pill ${materialFormType === t.value ? 'active' : ''}" data-material-type="${t.value}">${
+        icons[t.iconKey] || ''
+      } ${t.label}</button>
+    `
+  ).join('')
+
+  const contentFieldHtml =
+    typeMeta.contentKind === 'markdown'
+      ? `
+        <div>
+          <label class="field-label" for="material-content">Content (Markdown)</label>
+          <textarea id="material-content" class="input" rows="12" placeholder="${
+            materialFormType === 'code' ? 'Explain the example, then drop in a fenced code block:\n\n```js\nconsole.log(\'hello\')\n```' : 'Write your notes in Markdown…'
+          }">${escapeHtml(materialFormContent)}</textarea>
+        </div>
+      `
+      : `
+        <div>
+          <label class="field-label" for="material-url">${
+            materialFormType === 'video' ? 'Video link (YouTube, Vimeo, etc.)' : 'Slides link (Google Slides, Drive, etc.)'
+          }</label>
+          <input id="material-url" type="url" class="input" placeholder="https://…" value="${escapeHtml(materialFormExternalUrl)}" />
+        </div>
+      `
+
+  const publishDisabled = !user.lecturerVerified
+  const mainHtml = `
+    <p class="eyebrow">${editId ? 'EDIT MATERIAL' : 'NEW MATERIAL'}</p>
+    <h1 class="onboarding-heading" style="margin-bottom:1rem;">${editId ? 'Edit your material' : 'Create a new material'}</h1>
+
+    ${materialFormError ? `<p class="error-text">${escapeHtml(materialFormError)}</p>` : ''}
+
+    <div class="form-card" style="max-width:640px;">
+      <label class="field-label">Type</label>
+      <div class="filter-pill-row" style="margin-bottom:1rem;">${typePillsHtml}</div>
+
+      <div style="margin-bottom:1rem;">
+        <label class="field-label" for="material-title">Title</label>
+        <input id="material-title" type="text" class="input" placeholder="e.g. Closures, explained with the counter you already wrote" value="${escapeHtml(
+          materialFormTitle
+        )}" />
+      </div>
+
+      <div style="margin-bottom:1rem;">${contentFieldHtml}</div>
+
+      <div style="margin-bottom:1.25rem;">
+        <label class="field-label" for="material-language">Language (optional)</label>
+        <select id="material-language" class="input">${languageOptions}</select>
+      </div>
+
+      <div style="display:flex; gap:0.6rem; flex-wrap:wrap; align-items:center;">
+        <button type="button" class="btn btn-secondary" id="material-save-draft">Save as draft</button>
+        <button type="button" class="btn btn-primary" id="material-publish" ${
+          publishDisabled ? 'disabled title="Your lecturer account isn\'t verified yet — publishing is disabled until then."' : ''
+        }>Publish</button>
+        ${publishDisabled ? '<span class="lang-meta">Publishing unlocks once your lecturer account is verified.</span>' : ''}
+      </div>
+    </div>
+  `
+
+  app.innerHTML = renderAppShell({ topLabel: editId ? 'Edit material' : 'New material', mainHtml })
+  bindAppShell()
+
+  document.querySelectorAll('[data-material-type]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      materialFormType = btn.dataset.materialType
+      render()
+    })
+  })
+
+  function readFormIntoState() {
+    materialFormTitle = document.querySelector('#material-title').value
+    const contentEl = document.querySelector('#material-content')
+    const urlEl = document.querySelector('#material-url')
+    if (contentEl) materialFormContent = contentEl.value
+    if (urlEl) materialFormExternalUrl = urlEl.value
+    materialFormLanguage = document.querySelector('#material-language').value
+  }
+
+  async function saveMaterial({ publish }) {
+    if (materialFormSaving) return
+    readFormIntoState()
+    if (!materialFormTitle.trim()) {
+      materialFormError = 'title is required'
+      render()
+      return
+    }
+    materialFormSaving = true
+    materialFormError = ''
+    render()
+    try {
+      const fields = {
+        type: materialFormType,
+        title: materialFormTitle,
+        language: materialFormLanguage,
+        content: typeMeta.contentKind === 'markdown' ? materialFormContent : undefined,
+        externalUrl: typeMeta.contentKind === 'url' ? materialFormExternalUrl : undefined,
+      }
+      let id = materialFormEditId
+      if (id) {
+        await updateMaterial(id, fields)
+      } else {
+        const { material } = await createMaterial(fields)
+        id = material._id
+        materialFormEditId = id
+      }
+      if (publish) await publishMaterial(id)
+      studioData = null // force a refetch so Studio shows the new/updated material
+      showToast(publish ? 'Material published.' : 'Draft saved.')
+      goToStudio()
+    } catch (err) {
+      materialFormError = err.message
+      materialFormSaving = false
+      render()
+    }
+  }
+
+  document.querySelector('#material-save-draft').addEventListener('click', () => saveMaterial({ publish: false }))
+  const publishBtn = document.querySelector('#material-publish')
+  if (!publishDisabled) {
+    publishBtn.addEventListener('click', () => saveMaterial({ publish: true }))
+  }
+}
+
+function libraryDataReady() {
+  return libraryData !== null
+}
+
+async function loadLibraryData() {
+  libraryLoading = true
+  libraryError = ''
+  try {
+    libraryData = await fetchLibrary(libraryTypeFilter, libraryLanguageFilter)
+  } catch (err) {
+    libraryError = err.message
+    libraryData = { materials: [] }
+  }
+  libraryLoading = false
+  render()
+}
+
+function renderBrowseLibraryPage() {
+  if (!libraryDataReady()) {
+    app.innerHTML = renderAppShell({ topLabel: 'Browse library', mainHtml: '<p>Loading…</p>' })
+    bindAppShell()
+    if (!libraryLoading) loadLibraryData()
+    return
+  }
+
+  const { materials } = libraryData
+
+  const typePillsHtml = ['all', ...MATERIAL_TYPES.map((t) => t.value)]
+    .map((value) => {
+      const label = value === 'all' ? 'All types' : materialTypeMeta(value).label
+      return `<button type="button" class="filter-pill ${
+        libraryTypeFilter === value ? 'active' : ''
+      }" data-library-type-filter="${value}">${label}</button>`
+    })
+    .join('')
+
+  const languageOptions = ['all', 'General', ...LANGUAGE_NAMES]
+    .map(
+      (lang) =>
+        `<option value="${lang}" ${libraryLanguageFilter === lang ? 'selected' : ''}>${
+          lang === 'all' ? 'All languages' : lang
+        }</option>`
+    )
+    .join('')
+
+  const cardsHtml = materials
+    .map((m) => {
+      const typeMeta = materialTypeMeta(m.type)
+      return `
+        <button type="button" class="profile-card material-row" data-library-item="${m.id}" style="text-align:left; width:100%; cursor:pointer;">
+          <span class="material-type-icon">${icons[typeMeta.iconKey] || icons.file}</span>
+          <div style="flex:1; min-width:0;">
+            <p class="lang-name" style="margin-bottom:0.15rem;">${escapeHtml(m.title)}</p>
+            <p class="lang-meta">${escapeHtml(m.authorName)}${
+              m.authorUniversity ? ` &middot; ${escapeHtml(m.authorUniversity)}` : ''
+            } &middot; ${m.language}</p>
+          </div>
+        </button>
+      `
+    })
+    .join('')
+
+  const mainHtml = `
+    <div class="languages-page-header">
+      <div>
+        <p class="eyebrow">BROWSE LIBRARY</p>
+        <h1 class="onboarding-heading" style="margin-bottom:0.5rem;">Materials from your lecturers.</h1>
+        <p class="onboarding-subtext" style="max-width:60ch; margin-bottom:0;">Notes, code examples, slides, and videos posted by verified lecturers.</p>
+      </div>
+      <select id="library-language-filter" class="input" style="max-width:200px;">${languageOptions}</select>
+    </div>
+
+    ${libraryError ? `<p class="error-text">${escapeHtml(libraryError)}</p>` : ''}
+
+    <div class="filter-pill-row">${typePillsHtml}</div>
+
+    <div class="material-row-list">
+      ${cardsHtml || '<p class="playground-output-placeholder">No materials match this filter yet.</p>'}
+    </div>
+  `
+
+  app.innerHTML = renderAppShell({ topLabel: 'Browse library', mainHtml })
+  bindAppShell()
+
+  document.querySelectorAll('[data-library-type-filter]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      libraryTypeFilter = btn.dataset.libraryTypeFilter
+      libraryData = null
+      render()
+    })
+  })
+  document.querySelector('#library-language-filter').addEventListener('change', (e) => {
+    libraryLanguageFilter = e.target.value
+    libraryData = null
+    render()
+  })
+  document.querySelectorAll('[data-library-item]').forEach((btn) => {
+    btn.addEventListener('click', () => goToLibraryItem(btn.dataset.libraryItem))
+  })
+}
+
+async function loadLibraryMaterial(id) {
+  libraryMaterialLoading = true
+  libraryMaterialError = ''
+  try {
+    const { material } = await fetchLibraryMaterial(id)
+    libraryMaterialData = material
+  } catch (err) {
+    libraryMaterialError = err.message
+    libraryMaterialData = null
+  }
+  libraryMaterialLoading = false
+  render()
+}
+
+function renderMaterialDetailPage(id) {
+  if (!libraryMaterialData || libraryMaterialData.id !== id) {
+    app.innerHTML = renderAppShell({ topLabel: 'Material', mainHtml: '<p>Loading…</p>' })
+    bindAppShell()
+    if (!libraryMaterialLoading) loadLibraryMaterial(id)
+    return
+  }
+
+  const m = libraryMaterialData
+  const typeMeta = materialTypeMeta(m.type)
+
+  const bodyHtml =
+    typeMeta.contentKind === 'markdown'
+      ? `<div class="prose">${DOMPurify.sanitize(marked.parse(m.content || ''))}</div>`
+      : `
+        <div class="profile-card">
+          <p class="lang-meta" style="margin-bottom:1rem;">${
+            m.type === 'video' ? 'This material is a video hosted externally.' : 'This material is a slide deck hosted externally.'
+          }</p>
+          <a href="${escapeHtml(m.externalUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm">${
+            icons[typeMeta.iconKey] || ''
+          } Open ${typeMeta.label.toLowerCase()} ${icons.arrowRight}</a>
+        </div>
+      `
+
+  const mainHtml = `
+    ${libraryMaterialError ? `<p class="error-text">${escapeHtml(libraryMaterialError)}</p>` : ''}
+    <p class="eyebrow">${typeMeta.label.toUpperCase()} &middot; ${escapeHtml(m.language)}</p>
+    <h1 class="onboarding-heading" style="margin-bottom:0.25rem;">${escapeHtml(m.title)}</h1>
+    <p class="lang-meta" style="margin-bottom:1.5rem;">${escapeHtml(m.authorName)}${
+      m.authorUniversity ? ` &middot; ${escapeHtml(m.authorUniversity)}` : ''
+    }</p>
+    ${bodyHtml}
+  `
+
+  app.innerHTML = renderAppShell({ topLabel: 'Material', mainHtml })
+  bindAppShell()
+}
+
 // ---- Rankings (leaderboard) ----
 
 const RANKING_METRICS = [
@@ -1698,19 +2600,6 @@ function setRankingsPeriod(period) {
   loadRankingsData()
 }
 
-function renderMovementBadge(movement) {
-  if (movement === null || movement === undefined) {
-    return `<span class="rank-move rank-move-flat">${icons.minus}</span>`
-  }
-  if (movement > 0) {
-    return `<span class="rank-move rank-move-up">${icons.arrowUp} ${movement}</span>`
-  }
-  if (movement < 0) {
-    return `<span class="rank-move rank-move-down">${icons.arrowDown} ${Math.abs(movement)}</span>`
-  }
-  return `<span class="rank-move rank-move-flat">${icons.minus}</span>`
-}
-
 function renderRankingsRow(entry) {
   const handle = `@${entry.name.toLowerCase().replace(/\s+/g, '')}`
   const avatarUser = {
@@ -1733,7 +2622,6 @@ function renderRankingsRow(entry) {
       </div>
       <span class="leaderboard-col leaderboard-streak"><span class="stat-icon-flame">${icons.flame}</span>${entry.streak}</span>
       <span class="leaderboard-col leaderboard-quizzes"><span class="stat-icon-quiz">${icons.clipboardList}</span>${entry.quizzesFinished}</span>
-      <span class="leaderboard-col leaderboard-move">${renderMovementBadge(entry.movement)}</span>
       <span class="leaderboard-col leaderboard-points"><span class="stat-icon-gem">${icons.gem}</span>${entry.points.toLocaleString()}</span>
     </div>
   `
@@ -1802,7 +2690,6 @@ function renderRankingsPage() {
           <span class="leaderboard-learner">Learner</span>
           <span class="leaderboard-col">Streak</span>
           <span class="leaderboard-col">Quizzes</span>
-          <span class="leaderboard-col">Move</span>
           <span class="leaderboard-col">Points</span>
         </div>
         ${rankingsData.leaderboard.map(renderRankingsRow).join('')}
@@ -1815,7 +2702,7 @@ function renderRankingsPage() {
       <div>
         <p class="eyebrow">RANKINGS</p>
         <h1 class="onboarding-heading" style="margin-bottom:0.5rem;">Where you stand.</h1>
-        <p class="onboarding-subtext" style="max-width:60ch; margin-bottom:0;">Ranked on whichever metric you pick below, for the period you pick — everyone with rankings visibility on, platform-wide.</p>
+        <p class="onboarding-subtext" style="max-width:60ch; margin-bottom:0;">Pick a metric and a time period below. You're ranked against everyone on the platform.</p>
       </div>
     </div>
     ${bodyHtml}
@@ -2082,6 +2969,7 @@ async function handleLogout() {
   closeMobileMenu()
   user = null
   authMode = 'login'
+  viewingAsStudent = false
   chaptersByLanguage = {}
   expandedTracks = new Set()
   expandedChapters = new Set()
@@ -2105,6 +2993,11 @@ async function handleLogout() {
   onboardingAvatarChoice = 'bottts'
   onboardingAvatarError = ''
   onboardingAvatarSaving = false
+  onboardingPhoneNumber = ''
+  onboardingPhoneOtpSent = false
+  onboardingPhoneOtp = ''
+  onboardingPhoneError = ''
+  onboardingPhoneSaving = false
   window.history.pushState({}, '', '/')
   render()
 }
@@ -2391,7 +3284,7 @@ function renderCosmeticTile(item) {
   const metaText = item.equipped
     ? 'Equipped'
     : item.owned
-      ? 'Owned — tap to equip'
+      ? 'Click to equip'
       : `<span class="shop-cost-pill">${item.pointsCost.toLocaleString()} pts</span>`
 
   return `
@@ -2441,7 +3334,7 @@ function renderCosmeticsPage() {
       <div>
         <p class="eyebrow">COSMETICS SHOP</p>
         <h1 class="onboarding-heading" style="margin-bottom:0.5rem;">Spend what you earned.</h1>
-        <p class="onboarding-subtext" style="max-width:60ch; margin-bottom:0;">Points come from finishing quizzes and reading lessons. Nothing here affects your learning — it's all how your profile looks.</p>
+        <p class="onboarding-subtext" style="max-width:60ch; margin-bottom:0;">Points come from finishing quizzes and reading lessons. None of this changes how you learn, just how your profile looks.</p>
       </div>
       <div class="input-wrap languages-search-wrap">
         <span class="input-icon">${icons.search}</span>
@@ -2655,7 +3548,7 @@ function renderProfilePage() {
     <div class="profile-top-row">
       <div class="profile-card profile-avatar-card">
         <p class="lang-name" style="margin-bottom:0.15rem;">Your avatar</p>
-        <p class="lang-meta" style="margin-bottom:1rem;">Randomise for a brand new look — every pull is yours to keep, and any past one can be re-equipped for free below.</p>
+        <p class="lang-meta" style="margin-bottom:1rem;">Click the randomise button for a random new avatar. Every avatar you get is saved, so you can switch back to any past one below.</p>
         <div class="profile-avatar-row">
           ${renderAvatar(user, { size: 72 })}
           <div class="profile-avatar-name-block">
@@ -2726,11 +3619,11 @@ function renderProfilePage() {
 
         <div class="profile-card shop-streak-freeze-row">
           <div>
-            <p class="lang-name" style="margin-bottom:0.15rem;">Streak insurance</p>
+            <p class="lang-name" style="margin-bottom:0.15rem;">Streak freeze</p>
             <p class="lang-meta" style="margin-bottom:0.5rem;">${streakFreezeCount} freeze${
               streakFreezeCount === 1 ? '' : 's'
             } in your inventory</p>
-            <p class="lang-meta" style="margin-bottom:0.6rem;">A freeze holds your streak for one missed day, spent automatically.</p>
+            <p class="lang-meta" style="margin-bottom:0.6rem;">A streak freeze keeps your streak even when you don't login for the day.</p>
             <button type="button" class="pill-link" id="profile-buy-powerups">${
               icons.shoppingBag
             } Buy power-ups</button>
@@ -2763,24 +3656,7 @@ function renderProfilePage() {
           <div class="input profile-account-email" style="display:flex; align-items:center; gap:0.5rem; opacity:0.75;">${icons.envelope} <span class="profile-account-email-text">${escapeHtml(
             account.email
           )}</span></div>
-          <span class="lang-meta">Verified</span>
         </label>
-      </div>
-      <label class="field-label" style="display:block; margin-top:1rem;">Bio
-        <textarea id="profile-bio-input" class="input" rows="3" style="width:100%; resize:vertical;">${escapeHtml(
-          account.bio || ''
-        )}</textarea>
-      </label>
-      <div class="profile-toggle-list">
-        <label class="toggle-switch"><input type="checkbox" id="profile-toggle-streak-reminder" ${
-          account.dailyStreakReminder ? 'checked' : ''
-        } /> Daily streak reminder</label>
-        <label class="toggle-switch"><input type="checkbox" id="profile-toggle-leaderboard" ${
-          account.showOnLeaderboard ? 'checked' : ''
-        } /> Show me on the course leaderboard</label>
-        <label class="toggle-switch"><input type="checkbox" id="profile-toggle-sound" ${
-          account.soundEffectsEnabled ? 'checked' : ''
-        } /> Sound effects in lessons</label>
       </div>
       <div class="profile-account-actions">
         <button type="button" class="btn btn-primary btn-sm" id="profile-save-account">${icons.check} Save changes</button>
@@ -2908,10 +3784,6 @@ async function handleProfileStreakFreezePurchase() {
 async function handleSaveProfileAccount() {
   const fields = {
     name: document.querySelector('#profile-name-input').value,
-    bio: document.querySelector('#profile-bio-input').value,
-    dailyStreakReminder: document.querySelector('#profile-toggle-streak-reminder').checked,
-    showOnLeaderboard: document.querySelector('#profile-toggle-leaderboard').checked,
-    soundEffectsEnabled: document.querySelector('#profile-toggle-sound').checked,
   }
   try {
     const result = await updateProfileAccount(fields)
@@ -3058,12 +3930,7 @@ function renderPlaygroundPage() {
       <div>
         <p class="eyebrow">PLAYGROUND</p>
         <h1 class="onboarding-heading" style="margin-bottom:0.5rem;">Write whatever you like.</h1>
-        <p class="onboarding-subtext" style="max-width:56ch; margin-bottom:0;">Nothing here is graded, timed, or attached to a topic. Pick a language, run the file, keep the scratchpad open beside your lecture notes.</p>
-      </div>
-      <div class="playground-header-actions">
-        <span class="setup-chip">Scratchpad</span>
-        <button type="button" class="playground-icon-btn" id="playground-download" title="Download">${icons.download}</button>
-        <button type="button" class="playground-icon-btn" id="playground-share" title="Share">${icons.share}</button>
+        <p class="onboarding-subtext" style="max-width:56ch; margin-bottom:0;">Nothing here is graded or tied to a topic. Pick the language you want to code in. Good for writing code without having to leave the website.</p>
       </div>
     </div>
 
@@ -3105,14 +3972,9 @@ function renderPlaygroundPage() {
   })
   document.querySelector('#playground-run').addEventListener('click', runPlaygroundCode)
   document.querySelector('.playground-reset').addEventListener('click', resetPlaygroundCode)
-  document.querySelector('#playground-download').addEventListener('click', downloadPlaygroundCode)
   document.querySelector('#playground-add-lang').addEventListener('click', (e) => {
     e.preventDefault()
     goToLanguagesPage()
-  })
-  document.querySelector('#playground-share').addEventListener('click', () => {
-    playgroundError = "Sharing isn't available yet."
-    document.querySelector('#playground-output').innerHTML = renderPlaygroundOutput()
   })
   document.querySelector('#playground-clear').addEventListener('click', () => {
     playgroundResult = null
@@ -3173,18 +4035,6 @@ function switchPlaygroundLanguage(lang) {
 function resetPlaygroundCode() {
   playgroundCode[playgroundLanguage] = PLAYGROUND_STARTER_CODE[playgroundLanguage] ?? ''
   render()
-}
-
-function downloadPlaygroundCode() {
-  const code = playgroundEditor ? playgroundEditor.state.doc.toString() : ''
-  const ext = PLAYGROUND_FILE_EXTENSIONS[playgroundLanguage]
-  const blob = new Blob([code], { type: 'text/plain' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `scratch.${ext}`
-  a.click()
-  URL.revokeObjectURL(url)
 }
 
 async function runPlaygroundCode() {

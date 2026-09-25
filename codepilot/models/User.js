@@ -117,6 +117,111 @@ const userSchema = new mongoose.Schema(
       default: '',
       trim: true,
     },
+    // Phase 11 (Lecturer Materials). A lecturer gets an entirely different
+    // dashboard ("Studio") in place of the student experience — see
+    // src/main.js's render() dispatcher. university/coursesTaught are
+    // schema-optional (only meaningful for lecturers) since enforcing
+    // "required for lecturers" at the schema level for two plain profile
+    // strings isn't worth a conditional-required validator here — that
+    // enforcement lives in authController.register instead.
+    role: {
+      type: String,
+      enum: ['student', 'lecturer'],
+      default: 'student',
+    },
+    // Gates the Publish action (see Material.js / materialController.js) —
+    // flipped manually in MongoDB by the developer after reviewing the
+    // verification email sent on lecturer registration (utils/mailer.js).
+    // No in-app admin approval UI exists.
+    lecturerVerified: {
+      type: Boolean,
+      default: false,
+    },
+    university: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    // Plain free-text (e.g. "CSC301, CSC420"), not a separate collection —
+    // only ever displayed back, never queried.
+    coursesTaught: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    // Student verification (added after Phase 11's lecturer flow, same
+    // manual-review shape): a Baze University email is required at
+    // registration (enforced in authController.register, not here), and a
+    // photo of the student's ID card plus its expiration date are captured
+    // so the developer can spot-check real students. Stored as a base64
+    // data URI directly on the document — Render's free-tier disk is
+    // ephemeral, same reasoning as why Material slides/video are external
+    // links rather than uploads, but an ID photo has no natural public URL
+    // to link to, so it goes in Mongo instead (small enough per-document to
+    // be fine at this project's scale).
+    idCardImage: {
+      type: String,
+      default: null,
+    },
+    idCardExpirationDate: {
+      type: Date,
+      default: null,
+    },
+    // Purely a manual-review bookkeeping flag, like lecturerVerified — it
+    // does not gate anything in-app (a student gets full access immediately
+    // on registration). The only automatic enforcement is the expiration
+    // date check in authController.login.
+    studentVerified: {
+      type: Boolean,
+      default: false,
+    },
+    // Phone/OTP verification — a new onboarding step inserted before the
+    // avatar pick, students only (see src/main.js's renderOnboardingPage()
+    // dispatcher). phoneNumber is normalized to E.164 (+234...) by
+    // controllers/phoneVerificationController.js before being stored here,
+    // never the raw user-typed format. phoneVerified is a real gate (unlike
+    // studentVerified) — the onboarding dispatcher skips straight past this
+    // step once it's true, specifically so a student who verified in a
+    // previous session but didn't finish avatar/language selection isn't
+    // sent a second OTP (real per-message SMS cost, unlike the free
+    // lecturer/student verification emails).
+    phoneNumber: {
+      type: String,
+      default: '',
+    },
+    phoneVerified: {
+      type: Boolean,
+      default: false,
+    },
+    // The four fields below are the pending-OTP's entire state — all
+    // cleared back to null/0 the moment verification succeeds, so a
+    // verified user carries no leftover OTP data. Stored in plain text
+    // (not hashed): a 4-digit code that expires in 10 minutes is low
+    // enough stakes that hashing buys little over the existing
+    // attempt-cap + expiry protections below.
+    phoneOtpCode: {
+      type: String,
+      default: null,
+    },
+    phoneOtpExpiresAt: {
+      type: Date,
+      default: null,
+    },
+    // Caps wrong guesses against a given code (a 4-digit space is only
+    // 10,000 possibilities) — once exceeded, verify-otp refuses further
+    // guesses against that code and the student must request a new one.
+    phoneOtpAttempts: {
+      type: Number,
+      default: 0,
+    },
+    // When the last OTP was actually sent — send-otp enforces a cooldown
+    // off this (not off phoneOtpExpiresAt) so a fresh code can't be
+    // requested every few seconds, since each request costs real money via
+    // the SMS provider.
+    phoneOtpSentAt: {
+      type: Date,
+      default: null,
+    },
     // Real, persisted preferences — but none of the systems they'd control
     // (notifications, a leaderboard, sound effects) exist yet, so toggling
     // these has no effect for now. Defaults match the profile page mockup.
@@ -195,6 +300,12 @@ userSchema.methods.toPublicJSON = function () {
     showOnLeaderboard: this.showOnLeaderboard,
     soundEffectsEnabled: this.soundEffectsEnabled,
     dailyGoalTier: this.dailyGoalTier,
+    role: this.role,
+    lecturerVerified: this.lecturerVerified,
+    university: this.university,
+    coursesTaught: this.coursesTaught,
+    phoneNumber: this.phoneNumber,
+    phoneVerified: this.phoneVerified,
   }
 }
 

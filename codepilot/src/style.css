@@ -147,6 +147,13 @@ body {
 .input::placeholder {
   color: var(--text-faint);
 }
+/* type="file" doesn't vertically center its "Choose File" button + filename
+   text the way a normal text input centers its value against .input's
+   height — flexing the input itself fixes it in Chromium/Firefox. */
+input[type='file'].input {
+  display: flex;
+  align-items: center;
+}
 .input-with-icon {
   padding-left: 2.5rem;
 }
@@ -442,15 +449,29 @@ body {
   position: relative;
   padding: 1.5rem 1.5rem 2rem;
   display: flex;
-  align-items: center;
+  /* .form-topbar is absolutely positioned in the top-right corner, floating
+     independently of .form-card's vertical centering. A short heading
+     ("Welcome back") used to clear it fine at any width, but a tall card
+     (the lecturer Register form, with its extra University/Courses fields)
+     centers high enough to run underneath the topbar — and since the topbar
+     also grew to carry the Student/Lecturer toggle alongside the mode-switch
+     pill, it's wide enough now to collide at desktop widths too, not just
+     mobile. Top-align + reserve clearance instead of centering, at every
+     width, so the card always sits below the topbar regardless of its
+     height or the viewport size. */
+  align-items: flex-start;
+  padding-top: 6.5rem;
   justify-content: center;
 }
 .form-topbar {
   position: absolute;
   top: 1.25rem;
+  left: 1.25rem;
   right: 1.25rem;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 0.6rem;
 }
 .form-card {
@@ -458,15 +479,11 @@ body {
   max-width: 380px;
 }
 @media (max-width: 640px) {
-  /* .form-topbar is absolutely positioned in the top-right corner, floating
-     independently of .form-card's vertical centering. "Welcome back" (login)
-     is short enough to clear it, but "Create your account" (register) is
-     long enough to run underneath it. Top-align + reserve clearance instead
-     of centering, so the card always sits below the pill row regardless of
-     which heading is showing. */
   .form-panel {
-    align-items: flex-start;
-    padding-top: 5.5rem;
+    /* The topbar can wrap to two lines on narrow screens (segmented toggle
+       + mode pill + theme toggle no longer fit on one line) — reserve a bit
+       more clearance than the desktop single-line case. */
+    padding-top: 8rem;
   }
 }
 .form-title {
@@ -2358,12 +2375,6 @@ body {
   flex-wrap: wrap;
   margin-bottom: 1.5rem;
 }
-.playground-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-shrink: 0;
-}
 .playground-icon-btn {
   display: inline-flex;
   align-items: center;
@@ -2850,7 +2861,7 @@ body {
 }
 .leaderboard-row {
   display: grid;
-  grid-template-columns: 2.5rem 1fr 5rem 5rem 4.5rem 6rem;
+  grid-template-columns: 2.5rem 1fr 5rem 5rem 6rem;
   align-items: center;
   gap: 0.75rem;
   padding: 0.85rem 1.1rem;
@@ -2922,29 +2933,9 @@ body {
   font-weight: 600;
   color: var(--text-strong);
 }
-.rank-move {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.15rem;
-  font-size: 12px;
-  font-weight: 700;
-}
-.rank-move svg {
-  width: 13px;
-  height: 13px;
-}
-.rank-move-up {
-  color: var(--fill-success);
-}
-.rank-move-down {
-  color: var(--fill-danger);
-}
-.rank-move-flat {
-  color: var(--text-muted);
-}
 @media (max-width: 700px) {
   .leaderboard-row {
-    grid-template-columns: 2rem 1fr 3.5rem 5.5rem;
+    grid-template-columns: 2rem 1fr 5.5rem;
   }
   .leaderboard-streak,
   .leaderboard-quizzes {
@@ -3426,4 +3417,93 @@ body.mobile-menu-open {
   .profile-stat-tile {
     padding: 0.5rem 0.5rem;
   }
+}
+
+/* ---- Phase 11: Lecturer Materials ---- */
+
+.form-tagline {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+  margin-top: -1rem;
+  margin-bottom: 1.5rem;
+}
+
+.verified-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  background: var(--surface-accent-soft);
+  border: 1px solid var(--border-accent);
+  color: var(--text-accent);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.verified-pill svg {
+  width: 14px;
+  height: 14px;
+}
+.verified-pill.unverified {
+  background: var(--surface-sunken);
+  border-color: var(--border-default);
+  color: var(--text-muted);
+}
+
+.stat-icon-draft {
+  display: flex;
+  color: var(--text-muted);
+}
+
+.material-row-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.material-row {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+.material-type-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  background: var(--surface-sunken);
+  color: var(--text-accent);
+}
+.material-draft-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-default);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.material-edit-btn {
+  flex-shrink: 0;
+}
+
+.sidebar-bottom-group {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.sidebar-lecturer-card {
+  margin: 0.75rem 1rem 0;
+  padding: 0.85rem 1rem;
 }

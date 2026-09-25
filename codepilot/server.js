@@ -13,12 +13,17 @@ import { shopRoutes } from './routes/shopRoutes.js'
 import { profileRoutes } from './routes/profileRoutes.js'
 import { homeRoutes } from './routes/homeRoutes.js'
 import { leaderboardRoutes } from './routes/leaderboardRoutes.js'
+import { materialRoutes } from './routes/materialRoutes.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 const app = express()
 
-app.use(express.json())
+// Default 100kb limit is too small for a registration request carrying a
+// base64-encoded student ID card photo (models/User.js's idCardImage) —
+// raised to give headroom over the 5MB raw-file cap enforced in
+// authController.register (base64 inflates size by ~1/3, plus JSON overhead).
+app.use(express.json({ limit: '8mb' }))
 app.use(sessionMiddleware)
 
 // Vite's build writes the bundled frontend to dist/ (see vite.config.js).
@@ -35,6 +40,7 @@ app.use('/api/shop', shopRoutes)
 app.use('/api/profile', profileRoutes)
 app.use('/api/home', homeRoutes)
 app.use('/api/leaderboard', leaderboardRoutes)
+app.use('/api/materials', materialRoutes)
 
 // Anything that isn't a static asset or an API route falls back to
 // index.html, so client-side routing (once added) still works on refresh.
