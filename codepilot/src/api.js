@@ -41,15 +41,12 @@ export function fetchMe() {
   return request('/api/users/me')
 }
 
-export function sendPhoneOtp(phoneNumber) {
-  return request('/api/users/phone/send-otp', {
-    method: 'POST',
-    body: JSON.stringify({ phoneNumber }),
-  })
+export function sendEmailOtp() {
+  return request('/api/users/email/send-otp', { method: 'POST' })
 }
 
-export function verifyPhoneOtp(code) {
-  return request('/api/users/phone/verify-otp', {
+export function verifyEmailOtp(code) {
+  return request('/api/users/email/verify-otp', {
     method: 'POST',
     body: JSON.stringify({ code }),
   })

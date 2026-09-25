@@ -15,6 +15,19 @@ const transporter = nodemailer.createTransport({
   },
 })
 
+// Unlike the review emails below (informational, fire-and-forget), this one
+// is awaited by its caller and throws on failure — a student can't finish
+// onboarding without the code actually arriving, so a silent failure isn't
+// acceptable here.
+export async function sendOtpEmail(toEmail, code) {
+  await transporter.sendMail({
+    from: process.env.GMAIL_USER,
+    to: toEmail,
+    subject: 'Your CodePilot verification code',
+    text: `Your OTP for CodePilot is ${code}.\nIt lasts for only 10 minutes so hurry`,
+  })
+}
+
 // Called fire-and-forget (no await) from authController.register so a mail
 // outage can never block or fail a registration — this never throws, it
 // only logs, and there is no in-app record of whether the email actually

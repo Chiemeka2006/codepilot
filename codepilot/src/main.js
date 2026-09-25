@@ -33,8 +33,8 @@ import {
   deleteMaterial,
   fetchLibrary,
   fetchLibraryMaterial,
-  sendPhoneOtp,
-  verifyPhoneOtp,
+  sendEmailOtp,
+  verifyEmailOtp,
 } from './api.js'
 import { SUPPORTED_LANGUAGES, LANGUAGE_NAMES } from '../shared/languages.js'
 import { MATERIAL_TYPES } from '../shared/materialTypes.js'
@@ -105,16 +105,15 @@ let onboardingAvatarChoice = 'bottts'
 let onboardingAvatarError = ''
 let onboardingAvatarSaving = false
 
-// Phone/OTP verification — a new step inserted BEFORE the avatar pick
+// Email OTP verification — a new step inserted BEFORE the avatar pick
 // (students only; see renderOnboardingPage()'s dispatcher, which gates on
-// the real, persisted `user.phoneVerified` rather than a step number, so a
+// the real, persisted `user.emailVerified` rather than a step number, so a
 // student who already verified in a past session skips straight past this
-// on their next visit instead of being sent another OTP).
-let onboardingPhoneNumber = ''
-let onboardingPhoneOtpSent = false
-let onboardingPhoneOtp = ''
-let onboardingPhoneError = ''
-let onboardingPhoneSaving = false
+// on their next visit instead of being sent another code).
+let onboardingEmailOtpSent = false
+let onboardingEmailOtp = ''
+let onboardingEmailError = ''
+let onboardingEmailSaving = false
 
 // Home page state
 let homePageData = null
@@ -1175,12 +1174,12 @@ function topicsUnlocked() {
 // Onboarding is 2 steps — step 1 (new) picks a free starter avatar, step 2
 // is languages + daily goal (the whole page this used to be, single-step).
 function renderOnboardingPage() {
-  // Gated on the real, persisted phoneVerified flag (not a step counter) —
+  // Gated on the real, persisted emailVerified flag (not a step counter) —
   // a refresh mid-onboarding still restarts the avatar/language steps from
-  // scratch (harmless, see their own comments), but must NOT re-send an
-  // OTP to someone who already verified, since each send costs real money.
-  if (!user.phoneVerified) {
-    renderOnboardingPhoneStep()
+  // scratch (harmless, see their own comments), but must NOT make someone
+  // who already verified do it again.
+  if (!user.emailVerified) {
+    renderOnboardingEmailStep()
   } else if (onboardingStep === 1) {
     renderOnboardingAvatarStep()
   } else {
@@ -1188,7 +1187,7 @@ function renderOnboardingPage() {
   }
 }
 
-function renderOnboardingPhoneStep() {
+function renderOnboardingEmailStep() {
   app.innerHTML = `
     <div class="onboarding-page">
       <div class="onboarding-topbar">
@@ -1204,8 +1203,8 @@ function renderOnboardingPhoneStep() {
       <div class="onboarding-body">
         <span class="setup-chip setup-chip-mobile">&bull; First-time setup</span>
         <p class="eyebrow">WELCOME, ${user.name.toUpperCase()} &middot; STEP 1 OF 3</p>
-        <h1 class="onboarding-heading">Verify your phone number.</h1>
-        <p class="onboarding-subtext">We text a 4-digit code to confirm you're a real Baze University student before you can start.</p>
+        <h1 class="onboarding-heading">Verify your email.</h1>
+        <p class="onboarding-subtext">We email a 4-digit code to your Baze University address to confirm it's really you before you can start.</p>
 
         <div class="progress-row">
           <span>Setting up your account</span>
@@ -1215,87 +1214,85 @@ function renderOnboardingPhoneStep() {
 
         <div class="form-card" style="max-width:420px; margin-top:1.5rem;">
           <div>
-            <label class="field-label" for="onboarding-phone-number">Phone number</label>
+            <label class="field-label" for="onboarding-email-address">Your email</label>
             <div class="input-wrap">
-              <span class="input-icon">${icons.phone}</span>
-              <input id="onboarding-phone-number" type="tel" placeholder="08012345678" class="input input-with-icon" value="${escapeHtml(
-                onboardingPhoneNumber
-              )}" ${onboardingPhoneOtpSent ? 'disabled' : ''} />
+              <span class="input-icon">${icons.envelope}</span>
+              <input id="onboarding-email-address" type="email" class="input input-with-icon" value="${escapeHtml(
+                user.email
+              )}" disabled />
             </div>
           </div>
           ${
-            onboardingPhoneOtpSent
+            onboardingEmailOtpSent
               ? `
             <div style="margin-top:1rem;">
-              <label class="field-label" for="onboarding-phone-otp">4-digit code</label>
-              <input id="onboarding-phone-otp" type="text" inputmode="numeric" maxlength="4" placeholder="1234" class="input" value="${escapeHtml(
-                onboardingPhoneOtp
+              <label class="field-label" for="onboarding-email-otp">4-digit code</label>
+              <input id="onboarding-email-otp" type="text" inputmode="numeric" maxlength="4" placeholder="1234" class="input" value="${escapeHtml(
+                onboardingEmailOtp
               )}" />
-              <p class="helper-text">Sent to ${escapeHtml(onboardingPhoneNumber)}.</p>
+              <p class="helper-text">Sent to ${escapeHtml(user.email)} — check your spam folder if it doesn't show up.</p>
             </div>
             <div style="display:flex; gap:0.6rem; margin-top:1.25rem; flex-wrap:wrap;">
-              <button type="button" id="onboarding-phone-verify" class="btn btn-primary" ${
-                onboardingPhoneSaving ? 'disabled' : ''
+              <button type="button" id="onboarding-email-verify" class="btn btn-primary" ${
+                onboardingEmailSaving ? 'disabled' : ''
               }>Verify ${icons.arrowRight}</button>
-              <button type="button" id="onboarding-phone-resend" class="btn btn-secondary" ${
-                onboardingPhoneSaving ? 'disabled' : ''
+              <button type="button" id="onboarding-email-resend" class="btn btn-secondary" ${
+                onboardingEmailSaving ? 'disabled' : ''
               }>Resend code</button>
             </div>
           `
               : `
             <div style="margin-top:1.25rem;">
-              <button type="button" id="onboarding-phone-send" class="btn btn-primary" ${
-                onboardingPhoneSaving ? 'disabled' : ''
+              <button type="button" id="onboarding-email-send" class="btn btn-primary" ${
+                onboardingEmailSaving ? 'disabled' : ''
               }>Send code ${icons.arrowRight}</button>
             </div>
           `
           }
-          ${onboardingPhoneError ? `<p class="error-text" style="margin-top:0.75rem;">${escapeHtml(onboardingPhoneError)}</p>` : ''}
+          ${onboardingEmailError ? `<p class="error-text" style="margin-top:0.75rem;">${escapeHtml(onboardingEmailError)}</p>` : ''}
         </div>
       </div>
     </div>
   `
   bindThemeToggle()
-  const sendBtn = document.querySelector('#onboarding-phone-send')
-  if (sendBtn) sendBtn.addEventListener('click', handleSendPhoneOtp)
-  const verifyBtn = document.querySelector('#onboarding-phone-verify')
-  if (verifyBtn) verifyBtn.addEventListener('click', handleVerifyPhoneOtp)
-  const resendBtn = document.querySelector('#onboarding-phone-resend')
-  if (resendBtn) resendBtn.addEventListener('click', handleSendPhoneOtp)
-  const numberInput = document.querySelector('#onboarding-phone-number')
-  if (numberInput) numberInput.addEventListener('input', (e) => { onboardingPhoneNumber = e.target.value })
-  const otpInput = document.querySelector('#onboarding-phone-otp')
-  if (otpInput) otpInput.addEventListener('input', (e) => { onboardingPhoneOtp = e.target.value })
+  const sendBtn = document.querySelector('#onboarding-email-send')
+  if (sendBtn) sendBtn.addEventListener('click', handleSendEmailOtp)
+  const verifyBtn = document.querySelector('#onboarding-email-verify')
+  if (verifyBtn) verifyBtn.addEventListener('click', handleVerifyEmailOtp)
+  const resendBtn = document.querySelector('#onboarding-email-resend')
+  if (resendBtn) resendBtn.addEventListener('click', handleSendEmailOtp)
+  const otpInput = document.querySelector('#onboarding-email-otp')
+  if (otpInput) otpInput.addEventListener('input', (e) => { onboardingEmailOtp = e.target.value })
 }
 
-async function handleSendPhoneOtp() {
-  onboardingPhoneError = ''
-  onboardingPhoneSaving = true
+async function handleSendEmailOtp() {
+  onboardingEmailError = ''
+  onboardingEmailSaving = true
   render()
   try {
-    await sendPhoneOtp(onboardingPhoneNumber)
-    onboardingPhoneOtpSent = true
-    onboardingPhoneOtp = ''
+    await sendEmailOtp()
+    onboardingEmailOtpSent = true
+    onboardingEmailOtp = ''
   } catch (err) {
-    onboardingPhoneError = err.message
+    onboardingEmailError = err.message
   }
-  onboardingPhoneSaving = false
+  onboardingEmailSaving = false
   render()
 }
 
-async function handleVerifyPhoneOtp() {
-  onboardingPhoneError = ''
-  onboardingPhoneSaving = true
+async function handleVerifyEmailOtp() {
+  onboardingEmailError = ''
+  onboardingEmailSaving = true
   render()
   try {
-    const { user: updatedUser } = await verifyPhoneOtp(onboardingPhoneOtp)
+    const { user: updatedUser } = await verifyEmailOtp(onboardingEmailOtp)
     setUser(updatedUser)
     // render() below now skips straight past this step since
-    // user.phoneVerified is true — no explicit step-advance needed here.
+    // user.emailVerified is true — no explicit step-advance needed here.
   } catch (err) {
-    onboardingPhoneError = err.message
+    onboardingEmailError = err.message
   }
-  onboardingPhoneSaving = false
+  onboardingEmailSaving = false
   render()
 }
 
@@ -2993,11 +2990,10 @@ async function handleLogout() {
   onboardingAvatarChoice = 'bottts'
   onboardingAvatarError = ''
   onboardingAvatarSaving = false
-  onboardingPhoneNumber = ''
-  onboardingPhoneOtpSent = false
-  onboardingPhoneOtp = ''
-  onboardingPhoneError = ''
-  onboardingPhoneSaving = false
+  onboardingEmailOtpSent = false
+  onboardingEmailOtp = ''
+  onboardingEmailError = ''
+  onboardingEmailSaving = false
   window.history.pushState({}, '', '/')
   render()
 }

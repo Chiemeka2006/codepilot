@@ -175,21 +175,18 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    // Phone/OTP verification — a new onboarding step inserted before the
+    // Email OTP verification — a new onboarding step inserted before the
     // avatar pick, students only (see src/main.js's renderOnboardingPage()
-    // dispatcher). phoneNumber is normalized to E.164 (+234...) by
-    // controllers/phoneVerificationController.js before being stored here,
-    // never the raw user-typed format. phoneVerified is a real gate (unlike
-    // studentVerified) — the onboarding dispatcher skips straight past this
-    // step once it's true, specifically so a student who verified in a
+    // dispatcher). The code is always emailed to the account's own
+    // registered address (controllers/emailVerificationController.js),
+    // never a client-supplied one. This started as SMS/phone verification
+    // via Termii, but Nigerian SMS needs a registered sender ID (business
+    // documents), so it was switched to email. emailVerified is a real gate
+    // (unlike studentVerified) — the onboarding dispatcher skips straight
+    // past this step once it's true, so a student who verified in a
     // previous session but didn't finish avatar/language selection isn't
-    // sent a second OTP (real per-message SMS cost, unlike the free
-    // lecturer/student verification emails).
-    phoneNumber: {
-      type: String,
-      default: '',
-    },
-    phoneVerified: {
+    // sent a second code.
+    emailVerified: {
       type: Boolean,
       default: false,
     },
@@ -199,26 +196,25 @@ const userSchema = new mongoose.Schema(
     // (not hashed): a 4-digit code that expires in 10 minutes is low
     // enough stakes that hashing buys little over the existing
     // attempt-cap + expiry protections below.
-    phoneOtpCode: {
+    emailOtpCode: {
       type: String,
       default: null,
     },
-    phoneOtpExpiresAt: {
+    emailOtpExpiresAt: {
       type: Date,
       default: null,
     },
     // Caps wrong guesses against a given code (a 4-digit space is only
     // 10,000 possibilities) — once exceeded, verify-otp refuses further
     // guesses against that code and the student must request a new one.
-    phoneOtpAttempts: {
+    emailOtpAttempts: {
       type: Number,
       default: 0,
     },
     // When the last OTP was actually sent — send-otp enforces a cooldown
-    // off this (not off phoneOtpExpiresAt) so a fresh code can't be
-    // requested every few seconds, since each request costs real money via
-    // the SMS provider.
-    phoneOtpSentAt: {
+    // off this (not off emailOtpExpiresAt) so a fresh code can't be
+    // requested every few seconds.
+    emailOtpSentAt: {
       type: Date,
       default: null,
     },
@@ -304,8 +300,7 @@ userSchema.methods.toPublicJSON = function () {
     lecturerVerified: this.lecturerVerified,
     university: this.university,
     coursesTaught: this.coursesTaught,
-    phoneNumber: this.phoneNumber,
-    phoneVerified: this.phoneVerified,
+    emailVerified: this.emailVerified,
   }
 }
 
